@@ -12,6 +12,7 @@ terms of the MIT license. A copy of the license can be found in the file
 #include <string.h>  // memset, memcpy
 
 
+
 /* -----------------------------------------------------------
   Helpers
 ----------------------------------------------------------- */
@@ -90,19 +91,6 @@ static bool mi_heap_page_collect(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_t
     // no more used blocks, free the page. TODO: should we retire here and be less aggressive?
     _mi_page_free(page, pq, collect != NORMAL);
   }
-  else if (collect == ABANDON) {
-    // still used blocks but the thread is done; abandon the page
-    _mi_page_abandon(page, pq);
-  }
-  return true; // don't break
-}
-
-static bool mi_heap_page_never_delayed_free(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_t* page, void* arg1, void* arg2) {
-  UNUSED(arg1);
-  UNUSED(arg2);
-  UNUSED(heap);
-  UNUSED(pq);
-  _mi_page_use_delayed_free(page, MI_NEVER_DELAYED_FREE);
   return true; // don't break
 }
 
@@ -110,37 +98,15 @@ static void mi_heap_collect_ex(mi_heap_t* heap, mi_collect_t collect)
 {
   if (!mi_heap_is_initialized(heap)) return;
   _mi_deferred_free(heap, collect > NORMAL);
+
+  // absorb outstanding abandoned heaps (but not when abandoning)
+  while (_mi_heap_try_reclaim_abandoned(heap) && collect == FORCE) { /* nothing */ }
   
-  // collect (some) abandoned pages
-  if (collect >= NORMAL && !heap->no_reclaim) {
-    if (collect == NORMAL) {
-      // this may free some segments (but also take ownership of abandoned pages)
-      _mi_segment_try_reclaim_abandoned(heap, false, &heap->tld->segments);
-    }
-    #if MI_DEBUG
-    else if (collect == ABANDON && _mi_is_main_thread() && mi_heap_is_backing(heap)) {
-      // the main thread is abandoned, try to free all abandoned segments.
-      // if all memory is freed by now, all segments should be freed.
-      _mi_segment_try_reclaim_abandoned(heap, true, &heap->tld->segments);
-    }
-    #endif
-  }
-
-  // if abandoning, mark all pages to no longer add to delayed_free
-  if (collect == ABANDON) {
-    //for (mi_page_t* page = heap->pages[MI_BIN_FULL].first; page != NULL; page = page->next) {
-    //  _mi_page_use_delayed_free(page, false);  // set thread_free.delayed to MI_NO_DELAYED_FREE      
-    //}    
-    mi_heap_visit_pages(heap, &mi_heap_page_never_delayed_free, NULL, NULL);
-  }
-
   // free thread delayed blocks. 
-  // (if abandoning, after this there are no more local references into the pages.)
   _mi_heap_delayed_free(heap);
 
   // collect all pages owned by this thread
   mi_heap_visit_pages(heap, &mi_heap_page_collect, &collect, NULL);
-  mi_assert_internal( collect != ABANDON || heap->thread_delayed_free == NULL );
   
   // collect segment caches
   if (collect >= FORCE) {
@@ -153,10 +119,6 @@ static void mi_heap_collect_ex(mi_heap_t* heap, mi_collect_t collect)
   }
 }
 
-void _mi_heap_collect_abandon(mi_heap_t* heap) {
-  mi_heap_collect_ex(heap, ABANDON);
-}
-
 void mi_heap_collect(mi_heap_t* heap, bool force) mi_attr_noexcept {
   mi_heap_collect_ex(heap, (force ? FORCE : NORMAL));
 }
@@ -165,6 +127,49 @@ void mi_collect(bool force) mi_attr_noexcept {
   mi_heap_collect(mi_get_default_heap(), force);
 }
 
+/* -----------------------------------------------------------
+  Heap abandon
+----------------------------------------------------------- */
+
+static volatile _Atomic(mi_heap_t*) abandoned; // = NULL
+
+void _mi_heap_collect_abandon(mi_heap_t* heap) 
+{
+  mi_assert_internal(mi_heap_is_backing(heap));
+  mi_heap_collect_ex(heap, ABANDON);
+  _mi_stats_done(&heap->tld->stats);
+
+  if (heap->page_count==0) {
+    // free immediately
+    _mi_heap_backing_free(heap);
+    return;
+  }
+  else {
+    // still live objects: push on the abandoned list
+    mi_heap_t* next;
+    do {
+      next = (mi_heap_t*)mi_atomic_read_ptr_relaxed(mi_atomic_cast(void*, &abandoned));
+      heap->abandoned_next = next;
+    } while (!mi_atomic_cas_ptr_strong(mi_atomic_cast(void*, &abandoned), heap, next));
+  }
+}
+
+static void mi_heap_absorb(mi_heap_t* to, mi_heap_t* from);
+
+bool _mi_heap_try_reclaim_abandoned(mi_heap_t* heap) {
+  if (heap->no_reclaim) return false;
+  mi_heap_t* reclaim;
+  do {
+    reclaim = (mi_heap_t*)mi_atomic_read_ptr_relaxed(mi_atomic_cast(void*, &abandoned));
+    if (reclaim == NULL) return false;
+  } while (!mi_atomic_cas_ptr_strong(mi_atomic_cast(void*, &abandoned), reclaim->abandoned_next, reclaim));
+  reclaim->abandoned_next = NULL;
+
+  mi_heap_absorb(heap, reclaim);
+  _mi_segments_absorb(heap->thread_id, &heap->tld->segments, &reclaim->tld->segments);
+  _mi_heap_backing_free(reclaim);
+  return true;
+}
 
 /* -----------------------------------------------------------
   Heap new
@@ -199,7 +204,7 @@ mi_heap_t* mi_heap_new(void) {
   heap->thread_id = _mi_thread_id();
   heap->cookie = ((uintptr_t)heap ^ _mi_heap_random(bheap)) | 1;
   heap->random = _mi_heap_random(bheap);
-  heap->no_reclaim = true;  // don't reclaim abandoned pages or otherwise destroy is unsafe
+  heap->no_reclaim = true;  // don't absorb abandoned heaps or otherwise destroy is unsafe
   return heap;
 }
 
@@ -297,33 +302,46 @@ void mi_heap_destroy(mi_heap_t* heap) {
   Safe Heap delete
 ----------------------------------------------------------- */
 
-// Tranfer the pages from one heap to the other
+// Transfer the pages from one heap to the other
 static void mi_heap_absorb(mi_heap_t* heap, mi_heap_t* from) {
   mi_assert_internal(heap!=NULL);
   if (from==NULL || from->page_count == 0) return;
-
-  // unfull all full pages in the `from` heap
-  mi_page_t* page = from->pages[MI_BIN_FULL].first; 
-  while (page != NULL) {
-    mi_page_t* next = page->next;
-    _mi_page_unfull(page);
-    page = next;
-  }
-  mi_assert_internal(from->pages[MI_BIN_FULL].first == NULL);
-
-  // free outstanding thread delayed free blocks
-  _mi_heap_delayed_free(from);
+  //mi_assert_internal(from->thread_id==0 || heap->thread_id == from->thread_id);
+  //mi_assert_internal(from->thread_id==0 || heap->tld == from->tld);
 
   // transfer all pages by appending the queues; this will set
-  // a new heap field which is ok as all pages are unfull'd and thus 
-  // other threads won't access this field anymore (see `mi_free_block_mt`)
-  for (size_t i = 0; i < MI_BIN_FULL; i++) {
+  // a new heap pointer in the page; this is ok but it means other 
+  // threads may add to either heap's `thread_delayed_free` list.
+  for (size_t i = 0; i <= MI_BIN_FULL; i++) {
     mi_page_queue_t* pq = &heap->pages[i];
     mi_page_queue_t* append = &from->pages[i];
     size_t pcount = _mi_page_queue_append(heap, pq, append);
     heap->page_count += pcount;
     from->page_count -= pcount;
   }
+
+  // Now append the `thread_delayed_free` list atomically
+  mi_block_t* first;
+  do {
+    first = (mi_block_t*)from->thread_delayed_free;
+  } while (!mi_atomic_cas_ptr_strong(mi_atomic_cast(void*, &from->thread_delayed_free), NULL, first));
+  if (first != NULL) {
+    // find the end and re-encode the list
+    mi_block_t* last = first;
+    mi_block_t* next;
+    while((next = mi_block_nextx(from, last, from->cookie)) != NULL) {
+      mi_block_set_nextx(heap, last, next, heap->cookie); // re-encode
+      last = next;
+    }
+    // now append the heap thread_delayed_free list
+    mi_block_t* block;
+
+    do {
+      block = (mi_block_t*)heap->thread_delayed_free;
+      mi_block_set_nextx(heap, last, block, heap->cookie); // append
+    } while(!mi_atomic_cas_ptr_strong(mi_atomic_cast(void*, &heap->thread_delayed_free), first, block));
+  }
+
   mi_assert_internal(from->thread_delayed_free == NULL);
   mi_assert_internal(from->page_count == 0);
   
@@ -339,7 +357,7 @@ void mi_heap_delete(mi_heap_t* heap)
   if (!mi_heap_is_initialized(heap)) return;
 
   if (!mi_heap_is_backing(heap)) {
-    // tranfer still used pages to the backing heap
+    // transfer still used pages to the backing heap
     mi_heap_absorb(heap->tld->heap_backing, heap);
   }
   else {

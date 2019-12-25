@@ -49,6 +49,7 @@ bool       _mi_is_main_thread(void);
 uintptr_t  _mi_random_shuffle(uintptr_t x);
 uintptr_t  _mi_random_init(uintptr_t seed /* can be zero */);
 bool       _mi_preloading();  // true while the C runtime is not ready
+void       _mi_heap_backing_free(mi_heap_t* heap);
 
 // os.c
 size_t     _mi_os_page_size(void);
@@ -72,10 +73,9 @@ void        _mi_mem_collect(mi_os_tld_t* tld);
 // "segment.c"
 mi_page_t* _mi_segment_page_alloc(size_t block_wsize, mi_segments_tld_t* tld, mi_os_tld_t* os_tld);
 void       _mi_segment_page_free(mi_page_t* page, bool force, mi_segments_tld_t* tld);
-void       _mi_segment_page_abandon(mi_page_t* page, mi_segments_tld_t* tld);
-bool       _mi_segment_try_reclaim_abandoned( mi_heap_t* heap, bool try_all, mi_segments_tld_t* tld);
 void       _mi_segment_thread_collect(mi_segments_tld_t* tld);
 uint8_t*   _mi_segment_page_start(const mi_segment_t* segment, const mi_page_t* page, size_t block_size, size_t* page_size, size_t* pre_size); // page start for any page
+void       _mi_segments_absorb(uintptr_t tid, mi_segments_tld_t* to, mi_segments_tld_t* from);
 
 // "page.c"
 void*      _mi_malloc_generic(mi_heap_t* heap, size_t size)  mi_attr_noexcept mi_attr_malloc;
@@ -98,8 +98,9 @@ uint8_t    _mi_bin(size_t size);                // for stats
 uint8_t    _mi_bsr(uintptr_t x);                // bit-scan-right, used on BSD in "os.c"
 
 // "heap.c"
-void       _mi_heap_destroy_pages(mi_heap_t* heap);
 void       _mi_heap_collect_abandon(mi_heap_t* heap);
+bool       _mi_heap_try_reclaim_abandoned(mi_heap_t* heap);
+void       _mi_heap_destroy_pages(mi_heap_t* heap);
 uintptr_t  _mi_heap_random(mi_heap_t* heap);
 void       _mi_heap_set_default_direct(mi_heap_t* heap);
 

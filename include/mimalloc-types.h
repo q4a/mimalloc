@@ -232,8 +232,7 @@ typedef struct mi_segment_s {
   // segment fields
   struct mi_segment_s* next;   // must be the first segment field -- see `segment.c:segment_alloc`
   struct mi_segment_s* prev;
-  volatile _Atomic(struct mi_segment_s*) abandoned_next;
-  size_t          abandoned;   // abandoned pages (i.e. the original owning thread stopped) (`abandoned <= used`)
+  
   size_t          used;        // count of pages in use (`used <= capacity`)
   size_t          capacity;    // count of available pages (`#free + used`)
   size_t          segment_size;// for huge pages this may be different from `MI_SEGMENT_SIZE`
@@ -275,7 +274,7 @@ typedef struct mi_page_queue_s {
 
 // A heap owns a set of pages.
 struct mi_heap_s {
-  mi_tld_t*             tld;
+  mi_tld_t*             tld;                                         // thread local data
   mi_page_t*            pages_free_direct[MI_SMALL_WSIZE_MAX + 2];   // optimize: array where every entry points a page with possibly free blocks in the corresponding queue for that size.
   mi_page_queue_t       pages[MI_BIN_FULL + 1];                      // queue of pages for each size class (or "bin")
   volatile _Atomic(mi_block_t*) thread_delayed_free;
@@ -283,6 +282,7 @@ struct mi_heap_s {
   uintptr_t             cookie;
   uintptr_t             random;                                      // random number used for secure allocation
   size_t                page_count;                                  // total number of pages in the `pages` queues.
+  struct mi_heap_s*     abandoned_next;                              // if a thread terminates, its backing heap is put in an abandoned list
   bool                  no_reclaim;                                  // `true` if this heap should not reclaim abandoned pages
 };
 
@@ -406,6 +406,7 @@ typedef struct mi_os_tld_s {
 typedef struct mi_segments_tld_s {
   mi_segment_queue_t  small_free;   // queue of segments with free small pages
   mi_segment_queue_t  medium_free;  // queue of segments with free medium pages
+  mi_segment_queue_t  full;         // all other segments
   size_t              count;        // current number of segments;
   size_t              peak_count;   // peak number of segments
   size_t              current_size; // current size of all segments

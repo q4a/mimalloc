@@ -224,18 +224,6 @@ void _mi_page_free_collect(mi_page_t* page, bool force) {
   Page fresh and retire
 ----------------------------------------------------------- */
 
-// called from segments when reclaiming abandoned pages
-void _mi_page_reclaim(mi_heap_t* heap, mi_page_t* page) {
-  mi_assert_expensive(mi_page_is_valid_init(page));
-  mi_assert_internal(page->heap == NULL);
-  mi_assert_internal(_mi_page_segment(page)->page_kind != MI_PAGE_HUGE);
-  mi_assert_internal(!page->is_reset);  
-  _mi_page_free_collect(page,false);
-  mi_page_queue_t* pq = mi_page_queue(heap, page->block_size);
-  mi_page_queue_push(heap, pq, page);
-  mi_assert_expensive(_mi_page_is_valid(page));
-}
-
 // allocate a fresh page from a segment
 static mi_page_t* mi_page_fresh_alloc(mi_heap_t* heap, mi_page_queue_t* pq, size_t block_size) {
   mi_assert_internal(pq==NULL||mi_heap_contains_queue(heap, pq));
@@ -253,18 +241,8 @@ static mi_page_t* mi_page_fresh_alloc(mi_heap_t* heap, mi_page_queue_t* pq, size
 static mi_page_t* mi_page_fresh(mi_heap_t* heap, mi_page_queue_t* pq) {
   mi_assert_internal(mi_heap_contains_queue(heap, pq));
 
-  // try to reclaim an abandoned page first
-  mi_page_t* page = pq->first;
-  if (!heap->no_reclaim &&
-      _mi_segment_try_reclaim_abandoned(heap, false, &heap->tld->segments) &&
-      page != pq->first)
-  {
-    // we reclaimed, and we got lucky with a reclaimed page in our queue
-    page = pq->first;
-    if (page->free != NULL) return page;
-  }
-  // otherwise allocate the page
-  page = mi_page_fresh_alloc(heap, pq, pq->block_size);
+  // allocate the page
+  mi_page_t* page = mi_page_fresh_alloc(heap, pq, pq->block_size);
   if (page==NULL) return NULL;
   mi_assert_internal(pq->block_size==page->block_size);
   mi_assert_internal(pq==mi_page_queue(heap,page->block_size));
@@ -301,7 +279,7 @@ void _mi_heap_delayed_free(mi_heap_t* heap) {
 }
 
 /* -----------------------------------------------------------
-  Unfull, abandon, free and retire
+  Unfull, free and retire
 ----------------------------------------------------------- */
 
 // Move a page from the full list back to a regular list
@@ -331,40 +309,6 @@ static void mi_page_to_full(mi_page_t* page, mi_page_queue_t* pq) {
 
   mi_page_queue_enqueue_from(&page->heap->pages[MI_BIN_FULL], pq, page);
   _mi_page_free_collect(page,false);  // try to collect right away in case another thread freed just before MI_USE_DELAYED_FREE was set
-}
-
-
-// Abandon a page with used blocks at the end of a thread.
-// Note: only call if it is ensured that no references exist from
-// the `page->heap->thread_delayed_free` into this page.
-// Currently only called through `mi_heap_collect_ex` which ensures this.
-void _mi_page_abandon(mi_page_t* page, mi_page_queue_t* pq) {
-  mi_assert_internal(page != NULL);
-  mi_assert_expensive(_mi_page_is_valid(page));
-  mi_assert_internal(pq == mi_page_queue_of(page));
-  mi_assert_internal(page->heap != NULL);
-  
-#if MI_DEBUG > 1
-  mi_heap_t* pheap = (mi_heap_t*)mi_atomic_read_ptr(mi_atomic_cast(void*, &page->heap));
-#endif
-
-  // remove from our page list
-  mi_segments_tld_t* segments_tld = &page->heap->tld->segments;
-  mi_page_queue_remove(pq, page);
-
-  // page is no longer associated with our heap
-  mi_atomic_write_ptr(mi_atomic_cast(void*, &page->heap), NULL);
-
-#if MI_DEBUG>1
-  // check there are no references left..
-  for (mi_block_t* block = (mi_block_t*)pheap->thread_delayed_free; block != NULL; block = mi_block_nextx(pheap, block, pheap->cookie)) {
-    mi_assert_internal(_mi_ptr_page(block) != page);
-  }
-#endif
-
-  // and abandon it
-  mi_assert_internal(page->heap == NULL);
-  _mi_segment_page_abandon(page,segments_tld);
 }
 
 
@@ -796,6 +740,9 @@ void* _mi_malloc_generic(mi_heap_t* heap, size_t size) mi_attr_noexcept
 
   // call potential deferred free routines
   _mi_deferred_free(heap, false);
+
+  // absorb another abondoned heap?
+  _mi_heap_try_reclaim_abandoned(heap);
 
   // free delayed frees from other threads
   _mi_heap_delayed_free(heap);

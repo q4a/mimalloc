@@ -31,10 +31,6 @@ static uint8_t* mi_segment_raw_page_start(const mi_segment_t* segment, const mi_
   In any case the memory for a segment is virtual and only
   committed on demand (i.e. we are careful to not touch the memory
   until we actually allocate a block there)
-
-  If a  thread ends, it "abandons" pages with used blocks
-  and there is an abandoned segment list whose segments can
-  be reclaimed by still running threads, much like work-stealing.
 ----------------------------------------------------------- */
 
 
@@ -85,28 +81,49 @@ static void mi_segment_enqueue(mi_segment_queue_t* queue, mi_segment_t* segment)
 }
 
 static mi_segment_queue_t* mi_segment_free_queue_of_kind(mi_page_kind_t kind, mi_segments_tld_t* tld) {
+  mi_assert_internal(kind <= MI_PAGE_MEDIUM);
   if (kind == MI_PAGE_SMALL) return &tld->small_free;
   else if (kind == MI_PAGE_MEDIUM) return &tld->medium_free;
-  else return NULL;
+  else return NULL; // paranoia
 }
 
 static mi_segment_queue_t* mi_segment_free_queue(mi_segment_t* segment, mi_segments_tld_t* tld) {
-  return mi_segment_free_queue_of_kind(segment->page_kind, tld);
+  mi_page_kind_t kind = segment->page_kind;
+  return mi_segment_free_queue_of_kind(kind, tld);
+}
+
+static mi_segment_queue_t* mi_segment_queue(mi_segment_t* segment, mi_segments_tld_t* tld) {
+  mi_segment_queue_t* queue;
+  if (segment->page_kind <= MI_PAGE_MEDIUM && segment->used < segment->capacity) {
+    queue = mi_segment_free_queue(segment, tld);
+  }
+  else {
+    queue = &tld->full;
+  }
+  return queue;
 }
 
 // remove from free queue if it is in one
-static void mi_segment_remove_from_free_queue(mi_segment_t* segment, mi_segments_tld_t* tld) {
-  mi_segment_queue_t* queue = mi_segment_free_queue(segment, tld); // may be NULL
-  bool in_queue = (queue!=NULL && (segment->next != NULL || segment->prev != NULL || queue->first == segment));
-  if (in_queue) {
-    mi_segment_queue_remove(queue, segment);
-  }
+static void mi_segment_remove_from_queue(mi_segment_t* segment, mi_segments_tld_t* tld) {
+  if (segment->page_kind >= MI_PAGE_HUGE) return;
+  mi_segment_queue_remove(mi_segment_queue(segment,tld), segment);
 }
 
-static void mi_segment_insert_in_free_queue(mi_segment_t* segment, mi_segments_tld_t* tld) {
-  mi_segment_enqueue(mi_segment_free_queue(segment, tld), segment);
+static void mi_segment_insert_in_queue(mi_segment_t* segment, mi_segments_tld_t* tld) {  
+  mi_segment_enqueue(mi_segment_queue(segment, tld), segment);
 }
 
+static void mi_segment_move_to_free_queue(mi_segment_t* segment, mi_segments_tld_t* tld) {
+  mi_segment_queue_remove(&tld->full, segment);
+  mi_segment_insert_in_queue(segment, tld);
+  mi_assert_internal(mi_segment_queue_contains(mi_segment_free_queue(segment,tld), segment));
+}
+
+static void mi_segment_move_to_full_queue(mi_segment_t* segment, mi_segments_tld_t* tld) {
+  mi_segment_queue_remove(mi_segment_free_queue(segment,tld), segment);
+  mi_segment_insert_in_queue(segment, tld);
+  mi_assert_internal(mi_segment_queue_contains(&tld->full, segment));
+}
 
 /* -----------------------------------------------------------
  Invariant checking
@@ -114,6 +131,7 @@ static void mi_segment_insert_in_free_queue(mi_segment_t* segment, mi_segments_t
 
 #if (MI_DEBUG>=2)
 static bool mi_segment_is_in_free_queue(mi_segment_t* segment, mi_segments_tld_t* tld) {
+  if (segment->page_kind > MI_PAGE_MEDIUM) return false;
   mi_segment_queue_t* queue = mi_segment_free_queue(segment, tld);
   bool in_queue = (queue!=NULL && (segment->next != NULL || segment->prev != NULL || queue->first == segment));
   if (in_queue) {
@@ -139,7 +157,6 @@ static bool mi_segment_is_valid(mi_segment_t* segment) {
   mi_assert_internal(segment != NULL);
   mi_assert_internal(_mi_ptr_cookie(segment) == segment->cookie);
   mi_assert_internal(segment->used <= segment->capacity);
-  mi_assert_internal(segment->abandoned <= segment->used);
   size_t nfree = 0;
   for (size_t i = 0; i < segment->capacity; i++) {
     if (!segment->pages[i].segment_in_use) nfree++;
@@ -314,14 +331,19 @@ We keep a small segment cache per thread to increase local
 reuse and avoid setting/clearing guard pages in secure mode.
 ------------------------------------------------------------------------------- */
 
-static void mi_segments_track_size(long segment_size, mi_segments_tld_t* tld) {
-  if (segment_size>=0) _mi_stat_increase(&tld->stats->segments,1);
-                  else _mi_stat_decrease(&tld->stats->segments,1);
+static void mi_segments_track_count(long segment_size, mi_segments_tld_t* tld) {
   tld->count += (segment_size >= 0 ? 1 : -1);
   if (tld->count > tld->peak_count) tld->peak_count = tld->count;
   tld->current_size += segment_size;
   if (tld->current_size > tld->peak_size) tld->peak_size = tld->current_size;
 }
+
+static void mi_segments_track_size(long segment_size, mi_segments_tld_t* tld) {
+  if (segment_size>=0) _mi_stat_increase(&tld->stats->segments, 1);
+  else _mi_stat_decrease(&tld->stats->segments, 1);
+  mi_segments_track_count(segment_size, tld);
+}
+
 
 
 static void mi_segment_os_free(mi_segment_t* segment, size_t segment_size, mi_segments_tld_t* tld) {
@@ -525,7 +547,7 @@ static mi_segment_t* mi_segment_alloc(size_t required, mi_page_kind_t page_kind,
 
   // set protection
   mi_segment_protect(segment, true, tld->os);
-  
+
   //fprintf(stderr,"mimalloc: alloc segment at %p\n", (void*)segment);
   return segment;
 }
@@ -535,10 +557,11 @@ static void mi_segment_free(mi_segment_t* segment, bool force, mi_segments_tld_t
   UNUSED(force);
   //fprintf(stderr,"mimalloc: free segment at %p\n", (void*)segment);
   mi_assert(segment != NULL);
-  mi_segment_remove_from_free_queue(segment,tld);
+  mi_segment_remove_from_queue(segment,tld);
 
   mi_assert_expensive(!mi_segment_queue_contains(&tld->small_free, segment));
   mi_assert_expensive(!mi_segment_queue_contains(&tld->medium_free, segment));
+  mi_assert_expensive(!mi_segment_queue_contains(&tld->full, segment));
   mi_assert(segment->next == NULL);
   mi_assert(segment->prev == NULL);
   _mi_stat_decrease(&tld->stats->page_committed, segment->segment_info_size);  
@@ -556,10 +579,11 @@ static void mi_segment_free(mi_segment_t* segment, bool force, mi_segments_tld_t
   Free page management inside a segment
 ----------------------------------------------------------- */
 
-
+#if MI_DEBUG > 1
 static bool mi_segment_has_free(const mi_segment_t* segment) {
   return (segment->used < segment->capacity);
 }
+#endif
 
 static mi_page_t* mi_segment_find_free(mi_segment_t* segment, mi_segments_tld_t* tld) {
   mi_assert_internal(mi_segment_has_free(segment));
@@ -598,8 +622,6 @@ static mi_page_t* mi_segment_find_free(mi_segment_t* segment, mi_segments_tld_t*
 /* -----------------------------------------------------------
    Free
 ----------------------------------------------------------- */
-
-static void mi_segment_abandon(mi_segment_t* segment, mi_segments_tld_t* tld);
 
 static void mi_segment_page_clear(mi_segment_t* segment, mi_page_t* page, mi_segments_tld_t* tld) {
   mi_assert_internal(page->segment_in_use);
@@ -640,128 +662,11 @@ void _mi_segment_page_free(mi_page_t* page, bool force, mi_segments_tld_t* tld)
     // no more used pages; remove from the free list and free the segment
     mi_segment_free(segment, force, tld);
   }
-  else {
-    if (segment->used == segment->abandoned) {
-      // only abandoned pages; remove from free list and abandon
-      mi_segment_abandon(segment,tld);
-    }
-    else if (segment->used + 1 == segment->capacity) {
-      mi_assert_internal(segment->page_kind <= MI_PAGE_MEDIUM); // for now we only support small and medium pages
-      // move back to segments  free list
-      mi_segment_insert_in_free_queue(segment,tld);
-    }
+  else if (segment->used + 1 == segment->capacity) {
+    mi_assert_internal(segment->page_kind <= MI_PAGE_MEDIUM); // for now we only support small and medium pages
+    // move back to segments  free list
+    mi_segment_move_to_free_queue(segment, tld);
   }
-}
-
-
-/* -----------------------------------------------------------
-   Abandonment
------------------------------------------------------------ */
-
-// When threads terminate, they can leave segments with
-// live blocks (reached through other threads). Such segments
-// are "abandoned" and will be reclaimed by other threads to
-// reuse their pages and/or free them eventually
-static volatile _Atomic(mi_segment_t*) abandoned; // = NULL;
-static volatile _Atomic(uintptr_t)     abandoned_count; // = 0;
-
-static void mi_segment_abandon(mi_segment_t* segment, mi_segments_tld_t* tld) {
-  mi_assert_internal(segment->used == segment->abandoned);
-  mi_assert_internal(segment->used > 0);
-  mi_assert_internal(segment->abandoned_next == NULL);
-  mi_assert_expensive(mi_segment_is_valid(segment));
-
-  // remove the segment from the free page queue if needed
-  mi_segment_remove_from_free_queue(segment,tld);
-  mi_assert_internal(segment->next == NULL && segment->prev == NULL);
-  
-  // all pages in the segment are abandoned; add it to the abandoned list
-  _mi_stat_increase(&tld->stats->segments_abandoned, 1);
-  mi_segments_track_size(-((long)segment->segment_size), tld);
-  segment->thread_id = 0;
-  mi_segment_t* next;
-  do {
-    next = (mi_segment_t*)mi_atomic_read_ptr_relaxed(mi_atomic_cast(void*,&abandoned));
-    mi_atomic_write_ptr(mi_atomic_cast(void*,&segment->abandoned_next), next);
-  } while (!mi_atomic_cas_ptr_weak(mi_atomic_cast(void*,&abandoned), segment, next));
-  mi_atomic_increment(&abandoned_count);
-}
-
-void _mi_segment_page_abandon(mi_page_t* page, mi_segments_tld_t* tld) {
-  mi_assert(page != NULL);
-  mi_segment_t* segment = _mi_page_segment(page);
-  mi_assert_expensive(mi_segment_is_valid(segment));
-  segment->abandoned++;  
-  _mi_stat_increase(&tld->stats->pages_abandoned, 1);
-  mi_assert_internal(segment->abandoned <= segment->used);
-  if (segment->used == segment->abandoned) {
-    // all pages are abandoned, abandon the entire segment
-    mi_segment_abandon(segment,tld);
-  }
-}
-
-bool _mi_segment_try_reclaim_abandoned( mi_heap_t* heap, bool try_all, mi_segments_tld_t* tld) {
-  uintptr_t reclaimed = 0;
-  uintptr_t atmost;
-  if (try_all) {
-    atmost = abandoned_count+16;   // close enough
-  }
-  else {
-    atmost = abandoned_count/8;    // at most 1/8th of all outstanding (estimated)
-    if (atmost < 8) atmost = 8;    // but at least 8
-  }
-
-  // for `atmost` `reclaimed` abandoned segments...
-  while(atmost > reclaimed) {
-    // try to claim the head of the abandoned segments
-    mi_segment_t* segment;
-    do {
-      segment = (mi_segment_t*)abandoned;
-    } while(segment != NULL && !mi_atomic_cas_ptr_weak(mi_atomic_cast(void*,&abandoned), (mi_segment_t*)segment->abandoned_next, segment));
-    if (segment==NULL) break; // stop early if no more segments available
-
-    // got it.
-    mi_atomic_decrement(&abandoned_count);
-    segment->thread_id = _mi_thread_id();
-    segment->abandoned_next = NULL;
-    mi_segments_track_size((long)segment->segment_size,tld);
-    mi_assert_internal(segment->next == NULL && segment->prev == NULL);
-    mi_assert_expensive(mi_segment_is_valid(segment));
-    _mi_stat_decrease(&tld->stats->segments_abandoned,1);
-
-    // add its abandoned pages to the current thread
-    mi_assert(segment->abandoned == segment->used);
-    for (size_t i = 0; i < segment->capacity; i++) {
-      mi_page_t* page = &segment->pages[i];
-      if (page->segment_in_use) {
-        mi_assert_internal(!page->is_reset);
-        mi_assert_internal(page->is_committed);
-        segment->abandoned--;
-        mi_assert(page->next == NULL);
-        _mi_stat_decrease(&tld->stats->pages_abandoned, 1);
-        if (mi_page_all_free(page)) {
-          // if everything free by now, free the page
-          mi_segment_page_clear(segment,page,tld);
-        }
-        else {
-          // otherwise reclaim it          
-          _mi_page_reclaim(heap,page);
-        }
-      }
-    }
-    mi_assert(segment->abandoned == 0);
-    if (segment->used == 0) {  // due to page_clear
-      mi_segment_free(segment,false,tld);
-    }
-    else {
-      reclaimed++;
-      // add its free pages to the the current thread free small segment queue
-      if (segment->page_kind <= MI_PAGE_MEDIUM && mi_segment_has_free(segment)) {
-        mi_segment_insert_in_free_queue(segment,tld);
-      }
-    }
-  }
-  return (reclaimed>0);
 }
 
 
@@ -779,17 +684,18 @@ static mi_page_t* mi_segment_page_alloc_in(mi_segment_t* segment, mi_segments_tl
   if (segment->used == segment->capacity) {
     // if no more free pages, remove from the queue
     mi_assert_internal(!mi_segment_has_free(segment));
-    mi_segment_remove_from_free_queue(segment,tld);
+    mi_segment_move_to_full_queue(segment,tld);
   }
   return page;
 }
 
 static mi_page_t* mi_segment_page_alloc(mi_page_kind_t kind, size_t page_shift, mi_segments_tld_t* tld, mi_os_tld_t* os_tld) {
+  mi_assert_internal(kind <= MI_PAGE_MEDIUM);
   mi_segment_queue_t* free_queue = mi_segment_free_queue_of_kind(kind,tld);
   if (mi_segment_queue_is_empty(free_queue)) {
     mi_segment_t* segment = mi_segment_alloc(0,kind,page_shift,tld,os_tld);
     if (segment == NULL) return NULL;
-    mi_segment_enqueue(free_queue, segment);
+    mi_segment_insert_in_queue(segment, tld);
   }
   mi_assert_internal(free_queue->first != NULL);
   mi_page_t* page = mi_segment_page_alloc_in(free_queue->first,tld);
@@ -816,6 +722,7 @@ static mi_page_t* mi_segment_large_page_alloc(mi_segments_tld_t* tld, mi_os_tld_
   if (segment == NULL) return NULL;  
   mi_page_t* page = mi_segment_find_free(segment, tld);
   mi_assert_internal(page != NULL);
+  mi_segment_insert_in_queue(segment, tld); // add after allocating the page!
 #if MI_DEBUG>=2
   _mi_segment_page_start(segment, page, sizeof(void*), NULL, NULL)[0] = 0;
 #endif
@@ -827,7 +734,10 @@ static mi_page_t* mi_segment_huge_page_alloc(size_t size, mi_segments_tld_t* tld
   mi_segment_t* segment = mi_segment_alloc(size, MI_PAGE_HUGE, MI_SEGMENT_SHIFT,tld,os_tld);
   if (segment == NULL) return NULL;
   mi_assert_internal(mi_segment_page_size(segment) - segment->segment_info_size - (2*(MI_SECURE == 0 ? 0 : _mi_os_page_size())) >= size);
-  segment->thread_id = 0; // huge pages are immediately abandoned
+  
+  // huge pages are immediately abandoned
+  segment->thread_id = 0; 
+  
   mi_page_t* page = mi_segment_find_free(segment, tld);
   mi_assert_internal(page != NULL);
   return page;
@@ -853,5 +763,52 @@ mi_page_t* _mi_segment_page_alloc(size_t block_size, mi_segments_tld_t* tld, mi_
   }
   mi_assert_expensive(page == NULL || mi_segment_is_valid(_mi_page_segment(page)));
   mi_assert_internal(page == NULL || (mi_segment_page_size(_mi_page_segment(page)) - (MI_SECURE == 0 ? 0 : _mi_os_page_size())) >= block_size);
+  mi_assert_internal(page == NULL || _mi_page_segment(page)->page_kind > MI_PAGE_LARGE || mi_segment_queue_contains(mi_segment_queue(_mi_page_segment(page), tld), _mi_page_segment(page)));
   return page;
 }
+
+
+/* -----------------------------------------------------------
+   Segment absorbtion
+----------------------------------------------------------- */
+
+static void mi_segment_queue_append(mi_segment_queue_t* to, mi_segment_queue_t* from) {
+  if (from->first == NULL) {
+    // nothing to do
+  }
+  else if (to->first == NULL) {
+    // `to` is empty, use `from` as is
+    to->first = from->first;
+    to->last = from->last;
+  }
+  else {
+    // both non-empy, link them
+    mi_assert_internal(to->last->thread_id == from->first->thread_id);
+    to->last->next = from->first;
+    from->first->prev = to->last;
+    to->last = from->last;
+  }  
+}
+
+static void mi_segment_queue_absorb(uintptr_t tid, mi_segment_queue_t* to, mi_segment_queue_t* from, mi_segments_tld_t* to_tld) {
+  mi_segment_t* segment;
+  for (segment = from->first; segment != NULL; segment = segment->next) {
+    segment->thread_id = tid;
+    mi_segments_track_count((long)segment->segment_size, to_tld);
+  }
+  mi_segment_queue_append(to, from);
+  from->first = NULL;
+  from->last = NULL;
+}
+
+void _mi_segments_absorb(uintptr_t tid, mi_segments_tld_t* to, mi_segments_tld_t* from) {
+  mi_assert_internal(from->cache_count == 0);
+  mi_assert_internal(to->small_free.first==NULL || to->small_free.first->thread_id == tid);
+  mi_assert_internal(to->full.first==NULL || to->full.first->thread_id == tid);
+  mi_segment_queue_absorb(tid, &to->small_free, &from->small_free, to);
+  mi_segment_queue_absorb(tid, &to->medium_free, &from->medium_free, to);
+  mi_segment_queue_absorb(tid, &to->full, &from->full, to);
+  from->count = 0;
+  from->current_size = 0;
+}
+

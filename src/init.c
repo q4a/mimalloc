@@ -87,6 +87,7 @@ const mi_heap_t _mi_heap_empty = {
   0,
   0,
   0,
+  NULL,
   false
 };
 
@@ -100,7 +101,7 @@ mi_decl_thread mi_heap_t* _mi_heap_default = (mi_heap_t*)&_mi_heap_empty;
 static mi_tld_t tld_main = {
   0, false,
   &_mi_heap_main,
-  { { NULL, NULL }, {NULL ,NULL}, 0, 0, 0, 0, 0, 0, NULL, tld_main_stats, tld_main_os }, // segments
+  { { NULL, NULL }, {NULL ,NULL}, {NULL,NULL}, 0, 0, 0, 0, 0, 0, NULL, tld_main_stats, tld_main_os }, // segments
   { 0, tld_main_stats },  // os
   { MI_STATS_NULL }             // stats
 };
@@ -118,6 +119,7 @@ mi_heap_t _mi_heap_main = {
 #endif
   0,      // random
   0,      // page count
+  NULL,   // abandoned next
   false   // can reclaim
 };
 
@@ -213,6 +215,7 @@ static bool _mi_heap_init(void) {
     mi_tld_t*  tld = &td->tld;
     mi_heap_t* heap = &td->heap;
     memcpy(heap, &_mi_heap_empty, sizeof(*heap));
+    heap->abandoned_next = NULL;
     heap->thread_id = _mi_thread_id();
     heap->random = _mi_random_init(heap->thread_id);
     heap->cookie = ((uintptr_t)heap ^ _mi_heap_random(heap)) | 1;
@@ -225,6 +228,12 @@ static bool _mi_heap_init(void) {
     _mi_heap_set_default_direct(heap);
   }
   return false;
+}
+
+// free the memory associated with a thread backing heap
+void _mi_heap_backing_free(mi_heap_t* heap) {
+  if (!mi_heap_is_backing(heap) || heap == &_mi_heap_main) return;
+  _mi_os_free(heap, sizeof(mi_thread_data_t), &_mi_stats_main);
 }
 
 // Free the thread local default heap (called from `mi_thread_done`)
@@ -244,20 +253,14 @@ static bool _mi_heap_done(mi_heap_t* heap) {
   if (heap != &_mi_heap_main) {
     _mi_heap_collect_abandon(heap);
   }
-
-  // merge stats
-  _mi_stats_done(&heap->tld->stats);
-
-  // free if not the main thread
-  if (heap != &_mi_heap_main) {
-    _mi_os_free(heap, sizeof(mi_thread_data_t), &_mi_stats_main);
-  }
-#if (MI_DEBUG > 0)
+#if MI_DEBUG 
   else {
-    _mi_heap_destroy_pages(heap);
-    mi_assert_internal(heap->tld->heap_backing == &_mi_heap_main);
+    // free all memory
+    while(_mi_heap_try_reclaim_abandoned(heap)) { } // absorb all outstanding abandoned heaps
+    mi_heap_collect(heap,true);
   }
 #endif
+
   return false;
 }
 

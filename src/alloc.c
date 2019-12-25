@@ -191,7 +191,7 @@ static mi_decl_noinline void _mi_free_block_mt(mi_page_t* page, mi_block_t* bloc
   if (segment->page_kind==MI_PAGE_HUGE) {
     // huge page segments are always abandoned and can be freed immediately
     mi_assert_internal(mi_atomic_read_relaxed(&segment->thread_id)==0);
-    mi_assert_internal(mi_atomic_read_ptr_relaxed(mi_atomic_cast(void*,&segment->abandoned_next))==NULL);
+    
     // claim it and free
     mi_heap_t* heap = mi_get_default_heap();
     // paranoia: if this it the last reference, the cas should always succeed
