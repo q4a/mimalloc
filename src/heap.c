@@ -189,12 +189,6 @@ mi_heap_t* mi_heap_get_backing(void) {
   return bheap;
 }
 
-uintptr_t _mi_heap_random(mi_heap_t* heap) {
-  uintptr_t r = heap->random;
-  heap->random = _mi_random_shuffle(r);
-  return r;
-}
-
 mi_heap_t* mi_heap_new(void) {
   mi_heap_t* bheap = mi_heap_get_backing();
   mi_heap_t* heap = mi_heap_malloc_tp(bheap, mi_heap_t);
@@ -202,10 +196,18 @@ mi_heap_t* mi_heap_new(void) {
   memcpy(heap, &_mi_heap_empty, sizeof(mi_heap_t));
   heap->tld = bheap->tld;
   heap->thread_id = _mi_thread_id();
-  heap->cookie = ((uintptr_t)heap ^ _mi_heap_random(bheap)) | 1;
-  heap->random = _mi_heap_random(bheap);
-  heap->no_reclaim = true;  // don't absorb abandoned heaps or otherwise destroy is unsafe
+
+  _mi_random_split(&bheap->random, &heap->random);
+  heap->cookie = _mi_heap_random_next(heap) | 1;  
+  heap->key[0] = _mi_heap_random_next(heap);
+  heap->key[1] = _mi_heap_random_next(heap);
+  heap->no_reclaim = true;  // don't reclaim abandoned pages or otherwise destroy is unsafe
+
   return heap;
+}
+
+uintptr_t _mi_heap_random_next(mi_heap_t* heap) {
+  return _mi_random_next(&heap->random);
 }
 
 // zero out the page queues
@@ -329,16 +331,15 @@ static void mi_heap_absorb(mi_heap_t* heap, mi_heap_t* from) {
     // find the end and re-encode the list
     mi_block_t* last = first;
     mi_block_t* next;
-    while((next = mi_block_nextx(from, last, from->cookie)) != NULL) {
-      mi_block_set_nextx(heap, last, next, heap->cookie); // re-encode
+    while((next = mi_block_nextx(from, last, from->key[0], from->key[1])) != NULL) {
+      mi_block_set_nextx(heap, last, next, heap->key[0], heap->key[1]); // re-encode
       last = next;
     }
     // now append the heap thread_delayed_free list
     mi_block_t* block;
-
     do {
       block = (mi_block_t*)heap->thread_delayed_free;
-      mi_block_set_nextx(heap, last, block, heap->cookie); // append
+      mi_block_set_nextx(heap, last, block, heap->key[0], heap->key[1]); // append
     } while(!mi_atomic_cas_ptr_strong(mi_atomic_cast(void*, &heap->thread_delayed_free), first, block));
   }
 
