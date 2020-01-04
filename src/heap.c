@@ -81,19 +81,16 @@ typedef enum mi_collect_e {
   ABANDON
 } mi_collect_t;
 
-
-static bool mi_heap_page_collect(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_t* page, void* arg_collect, void* arg2 ) {
+#if MI_DEBUG>=2
+static bool mi_heap_page_check_collect(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_t* page, void* arg_collect, void* arg2) {
+  UNUSED(arg_collect);
   UNUSED(arg2);
   UNUSED(heap);
   mi_assert_internal(mi_heap_page_is_valid(heap, pq, page, NULL, NULL));
-  mi_collect_t collect = *((mi_collect_t*)arg_collect);
-  _mi_page_free_collect(page, collect >= ABANDON);
-  if (mi_page_all_free(page)) {
-    // no more used blocks, free the page. TODO: should we retire here and be less aggressive?
-    _mi_page_free(page, pq, collect != NORMAL);
-  }
+  mi_assert_internal(!mi_page_all_free(page));
   return true; // don't break
 }
+#endif
 
 static void mi_heap_collect_ex(mi_heap_t* heap, mi_collect_t collect)
 {
@@ -106,8 +103,13 @@ static void mi_heap_collect_ex(mi_heap_t* heap, mi_collect_t collect)
   // free thread delayed blocks. 
   _mi_heap_delayed_free(heap);
 
-  // collect all pages owned by this thread
-  mi_heap_visit_pages(heap, &mi_heap_page_collect, &collect, NULL);
+  // free retired pages
+  _mi_heap_collect_retired(heap, true);
+
+  #if MI_DEBUG>=2
+  // check heap state
+  mi_heap_visit_pages(heap, &mi_heap_page_check_collect, &collect, NULL);
+  #endif
   
   // collect segment caches
   if (collect >= FORCE) {
