@@ -12,8 +12,12 @@ terms of the MIT license. A copy of the license can be found in the file
 
 // Empty page used to initialize the small free pages array
 const mi_page_t _mi_page_empty = {
-  0, false, false, false, false, 0, 0,
-  { 0 }, false,
+  0, false, false, false, false,
+  0,       // capacity
+  0,       // reserved capacity
+  { 0 },   // flags
+  false,   // is_zero
+  0,       // retire_expire
   NULL,    // free
   #if MI_ENCODE_FREELIST
   { 0, 0 },
@@ -83,9 +87,9 @@ const mi_heap_t _mi_heap_empty = {
   MI_SMALL_PAGES_EMPTY,
   MI_PAGE_QUEUES_EMPTY,
   ATOMIC_VAR_INIT(NULL),
-  0,    // tid
-  0,    // cookie
-  { 0, 0 }, // keys
+  0,                // tid
+  0,                // cookie
+  { 0, 0 },         // keys
   { {0}, {0}, 0 },
   0,
   NULL,
@@ -107,7 +111,7 @@ static mi_tld_t tld_main = {
   { MI_STATS_NULL }             // stats
 };
 
-#if MI_INTPTR_SIZE==8   
+#if MI_INTPTR_SIZE==8
 #define MI_INIT_COOKIE  (0xCDCDCDCDCDCDCDCDUL)
 #else
 #define MI_INIT_COOKIE  (0xCDCDCDCDUL)
@@ -138,7 +142,7 @@ mi_stats_t _mi_stats_main = { MI_STATS_NULL };
 
 typedef struct mi_thread_data_s {
   mi_heap_t  heap;  // must come first due to cast in `_mi_heap_done`
-  mi_tld_t   tld;  
+  mi_tld_t   tld;
 } mi_thread_data_t;
 
 // Initialize the thread local default heap, called from `mi_thread_init`
@@ -161,7 +165,7 @@ static bool _mi_heap_init(void) {
     memcpy(heap, &_mi_heap_empty, sizeof(*heap));
     heap->abandoned_next = NULL;
     heap->thread_id = _mi_thread_id();
-    _mi_random_init(&heap->random);    
+    _mi_random_init(&heap->random);
     heap->cookie = _mi_heap_random_next(heap) | 1;
     heap->key[0] = _mi_heap_random_next(heap);
     heap->key[1] = _mi_heap_random_next(heap);
@@ -405,7 +409,7 @@ void mi_process_init(void) mi_attr_noexcept {
 
   _mi_heap_main.thread_id = _mi_thread_id();
   _mi_verbose_message("process init: 0x%zx\n", _mi_heap_main.thread_id);
-  _mi_random_init(&_mi_heap_main.random);  
+  _mi_random_init(&_mi_heap_main.random);
   #ifndef __APPLE__  // TODO: fix this? cannot update cookie if allocation already happened..
   _mi_heap_main.cookie = _mi_heap_random_next(&_mi_heap_main);
   _mi_heap_main.key[0] = _mi_heap_random_next(&_mi_heap_main);
