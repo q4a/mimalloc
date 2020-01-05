@@ -244,11 +244,7 @@ static mi_decl_noinline void _mi_free_block_mt(mi_page_t* page, mi_block_t* bloc
     }
 
     // and reset the MI_DELAYED_FREEING flag
-    do {
-      tfreex = tfree = page->thread_free;
-      mi_assert_internal(mi_tf_delayed(tfree) == MI_NEVER_DELAYED_FREE || mi_tf_delayed(tfree) == MI_DELAYED_FREEING);
-      if (mi_tf_delayed(tfree) != MI_NEVER_DELAYED_FREE) tfreex = mi_tf_set_delayed(tfree,MI_NO_DELAYED_FREE);
-    } while (!mi_atomic_cas_weak(mi_atomic_cast(uintptr_t,&page->thread_free), tfreex, tfree));
+    _mi_page_unset_delayed_freeing(page, MI_NO_DELAYED_FREE);    
   }
 }
 

@@ -92,9 +92,11 @@ void       _mi_page_abandon(mi_page_t* page, mi_page_queue_t* pq);            //
 void       _mi_heap_delayed_free(mi_heap_t* heap);
 void       _mi_heap_collect_retired(mi_heap_t* heap, bool force);
 
-void       _mi_page_use_delayed_free(mi_page_t* page, mi_delayed_t delay);
-size_t     _mi_page_queue_append(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_queue_t* append);
-void       _mi_deferred_free(mi_heap_t* heap, bool force);
+mi_delayed_t _mi_page_use_delayed_free(mi_page_t* page, mi_delayed_t delay);
+mi_delayed_t _mi_page_unset_delayed_freeing(mi_page_t* page, mi_delayed_t delay);
+
+size_t       _mi_page_queue_append(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_queue_t* append);
+void         _mi_deferred_free(mi_heap_t* heap, bool force);
 
 void       _mi_page_free_collect(mi_page_t* page,bool force);
 void       _mi_page_reclaim(mi_heap_t* heap, mi_page_t* page);   // callback from segments

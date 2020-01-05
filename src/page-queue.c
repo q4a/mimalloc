@@ -336,10 +336,17 @@ size_t _mi_page_queue_append(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_queue
   if (append->first==NULL) return 0;
 
   // set append pages to new heap and count
+  // concurrent thread may free in the page so we need to update the heap pointer carefully.
   size_t count = 0;
   for (mi_page_t* page = append->first; page != NULL; page = page->next) {
+    count++;      
+    
+    // ensure there are no concurrent accesses to `page->heap`
+    mi_delayed_t old_delay = _mi_page_use_delayed_free(page, MI_DELAYED_FREEING);
+    // update to the new heap
     mi_atomic_write_ptr(mi_atomic_cast(void*, &page->heap), heap);
-    count++;
+    // and allow concurrent access again
+    _mi_page_unset_delayed_freeing(page, old_delay);
   }
 
   if (pq->last==NULL) {

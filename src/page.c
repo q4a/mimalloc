@@ -119,7 +119,22 @@ bool _mi_page_is_valid(mi_page_t* page) {
 }
 #endif
 
-void _mi_page_use_delayed_free(mi_page_t* page, mi_delayed_t delay) {
+mi_delayed_t _mi_page_unset_delayed_freeing(mi_page_t* page, mi_delayed_t delay) {
+  mi_thread_free_t tfree;
+  mi_thread_free_t tfreex;
+  mi_delayed_t     old_delay;
+  do {
+    tfreex = tfree = page->thread_free;
+    old_delay = mi_tf_delayed(tfree);
+    mi_assert_internal(old_delay >= MI_DELAYED_FREEING);
+    if (old_delay != MI_NEVER_DELAYED_FREE) {
+      tfreex = mi_tf_set_delayed(tfree, delay);
+    }
+  } while(!mi_atomic_cas_strong(mi_atomic_cast(uintptr_t, &page->thread_free), tfreex, tfree));
+  return old_delay;
+}
+
+mi_delayed_t _mi_page_use_delayed_free(mi_page_t* page, mi_delayed_t delay  ) {
   mi_thread_free_t tfree;
   mi_thread_free_t tfreex;
   mi_delayed_t     old_delay;
@@ -133,8 +148,10 @@ void _mi_page_use_delayed_free(mi_page_t* page, mi_delayed_t delay) {
     else if (delay == old_delay) {
       break; // avoid atomic operation if already equal
     }
-  } while ((old_delay == MI_DELAYED_FREEING) ||
-    !mi_atomic_cas_weak(mi_atomic_cast(uintptr_t, &page->thread_free), tfreex, tfree));
+  }
+  while((old_delay == MI_DELAYED_FREEING) || 
+        !mi_atomic_cas_weak(mi_atomic_cast(uintptr_t,&page->thread_free), tfreex, tfree));
+  return old_delay;
 }
 
 
