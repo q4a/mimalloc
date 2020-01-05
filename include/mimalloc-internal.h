@@ -312,7 +312,7 @@ static inline mi_page_t* _mi_segment_page_of(const mi_segment_t* segment, const 
 
 // Quick page start for initialized pages
 static inline uint8_t* _mi_page_start(const mi_segment_t* segment, const mi_page_t* page, size_t* page_size) {
-  const size_t bsize = page->block_size;
+  const size_t bsize = page->xblock_size;
   mi_assert_internal(bsize > 0 && (bsize%sizeof(void*)) == 0);
   return _mi_segment_page_start(segment, page, bsize, page_size, NULL);
 }
@@ -320,6 +320,20 @@ static inline uint8_t* _mi_page_start(const mi_segment_t* segment, const mi_page
 // Get the page containing the pointer
 static inline mi_page_t* _mi_ptr_page(void* p) {
   return _mi_segment_page_of(_mi_ptr_segment(p), p);
+}
+
+// Get the block size of a page (special cased for huge objects)
+static inline size_t mi_page_block_size(const mi_page_t* page) {
+  const size_t bsize = page->xblock_size;
+  mi_assert_internal(bsize > 0);
+  if (mi_likely(bsize < MI_HUGE_BLOCK_SIZE)) {
+    return bsize;
+  }
+  else {
+    size_t psize;
+    _mi_segment_page_start(_mi_page_segment(page), page, bsize, &psize, NULL);
+    return psize;
+  }
 }
 
 // Thread free access
@@ -471,7 +485,7 @@ static inline mi_block_t* mi_block_next(const mi_page_t* page, const mi_block_t*
   // check for free list corruption: is `next` at least in the same page?
   // TODO: check if `next` is `page->block_size` aligned?
   if (mi_unlikely(next!=NULL && !mi_is_in_same_page(block, next))) {
-    _mi_fatal_error("corrupted free list entry of size %zub at %p: value 0x%zx\n", page->block_size, block, (uintptr_t)next);
+    _mi_fatal_error("corrupted free list entry of size %zub at %p: value 0x%zx\n", mi_page_block_size(page), block, (uintptr_t)next);
     next = NULL;
   }
   return next;

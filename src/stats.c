@@ -111,7 +111,7 @@ static void mi_stats_add(mi_stats_t* stats, const mi_stats_t* src) {
   mi_stat_counter_add(&stats->huge_count, &src->huge_count, 1);
   mi_stat_counter_add(&stats->giant_count, &src->giant_count, 1);
 #if MI_STAT>1
-  for (size_t i = 0; i <= MI_BIN_HUGE; i++) {
+  for (size_t i = 0; i < MI_BIN_FULL; i++) {
     if (src->normal[i].allocated > 0 || src->normal[i].freed > 0) {
       mi_stat_add(&stats->normal[i], &src->normal[i], 1);
     }
@@ -243,7 +243,7 @@ static void _mi_stats_print(mi_stats_t* stats, mi_msecs_t elapsed, mi_output_fun
   mi_print_header(out);
   #if MI_STAT>1
   mi_stat_count_t normal = { 0,0,0,0 };
-  mi_stats_print_bins(&normal, stats->normal, MI_BIN_HUGE, "normal",out);
+  mi_stats_print_bins(&normal, stats->normal, MI_BIN_LARGEST, "normal",out);
   mi_stat_print(&normal, "normal", 1, out);
   mi_stat_print(&stats->huge, "huge", (stats->huge_count.count == 0 ? 1 : -(stats->huge.allocated / stats->huge_count.count)), out);
   mi_stat_print(&stats->giant, "giant", (stats->giant_count.count == 0 ? 1 : -(stats->giant.allocated / stats->giant_count.count)), out);

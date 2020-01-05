@@ -225,8 +225,8 @@ static void mi_page_reset(mi_segment_t* segment, mi_page_t* page, size_t size, m
   mi_assert_internal(size <= psize);
   size_t reset_size = (size == 0 || size > psize ? psize : size);
   if (size == 0 && segment->page_kind >= MI_PAGE_LARGE && !mi_option_is_enabled(mi_option_eager_page_commit)) {
-    mi_assert_internal(page->block_size > 0);
-    reset_size = page->capacity * page->block_size;
+    mi_assert_internal(mi_page_block_size(page) > 0);
+    reset_size = page->capacity * mi_page_block_size(page);
   }
   _mi_mem_reset(start, reset_size, tld->os);
 }
@@ -240,8 +240,8 @@ static void mi_page_unreset(mi_segment_t* segment, mi_page_t* page, size_t size,
   uint8_t* start = mi_segment_raw_page_start(segment, page, &psize);
   size_t unreset_size = (size == 0 || size > psize ? psize : size);
   if (size == 0 && segment->page_kind >= MI_PAGE_LARGE && !mi_option_is_enabled(mi_option_eager_page_commit)) {
-    mi_assert_internal(page->block_size > 0);
-    unreset_size = page->capacity * page->block_size;
+    mi_assert_internal(mi_page_block_size(page) > 0);
+    unreset_size = page->capacity * mi_page_block_size(page);
   }
   bool is_zero = false;
   _mi_mem_unreset(start, unreset_size, &is_zero, tld->os);
@@ -272,7 +272,7 @@ static uint8_t* mi_segment_raw_page_start(const mi_segment_t* segment, const mi_
   }
 
   if (page_size != NULL) *page_size = psize;
-  mi_assert_internal(page->block_size == 0 || _mi_ptr_page(p) == page);
+  mi_assert_internal(page->xblock_size == 0 || _mi_ptr_page(p) == page);
   mi_assert_internal(_mi_ptr_segment(p) == segment);
   return p;
 }
@@ -295,7 +295,7 @@ uint8_t* _mi_segment_page_start(const mi_segment_t* segment, const mi_page_t* pa
   }
 
   if (page_size != NULL) *page_size = psize;
-  mi_assert_internal(page->block_size==0 || _mi_ptr_page(p) == page);
+  mi_assert_internal(page->xblock_size==0 || _mi_ptr_page(p) == page);
   mi_assert_internal(_mi_ptr_segment(p) == segment);
   return p;
 }
@@ -627,7 +627,7 @@ static void mi_segment_page_clear(mi_segment_t* segment, mi_page_t* page, mi_seg
   mi_assert_internal(page->segment_in_use);
   mi_assert_internal(mi_page_all_free(page));
   mi_assert_internal(page->is_committed);
-  size_t inuse = page->capacity * page->block_size;
+  size_t inuse = page->capacity * mi_page_block_size(page);
   _mi_stat_decrease(&tld->stats->page_committed, inuse);
   _mi_stat_decrease(&tld->stats->pages, 1);
 

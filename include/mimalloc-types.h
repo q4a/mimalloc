@@ -118,11 +118,14 @@ terms of the MIT license. A copy of the license can be found in the file
 #define MI_MAX_ALIGN_SIZE  16   // sizeof(max_align_t)
 
 // Maximum number of size classes. (spaced exponentially in 12.5% increments)
-#define MI_BIN_HUGE  (73U)
+#define MI_BIN_LARGEST  (73U)
 
 #if (MI_LARGE_OBJ_WSIZE_MAX >= 655360)
 #error "define more bins"
 #endif
+
+// Used to signal the block is huge
+#define MI_HUGE_BLOCK_SIZE   ((uint32_t)MI_HUGE_OBJ_SIZE_MAX)
 
 // The free lists use encoded next fields
 // (Only actually encodes when MI_ENCODED_FREELIST is defined.)
@@ -166,14 +169,16 @@ typedef uintptr_t mi_thread_free_t;
 // implement a monotonic heartbeat. The `thread_free` list is needed for
 // avoiding atomic operations in the common case.
 //
-// `used - thread_freed` == actual blocks that are in use (alive)
-// `used - thread_freed + |free| + |local_free| == capacity`
+// `used - |thread_free|` == actual blocks that are in use (alive)
+// `used - |thread_free| + |free| + |local_free| == capacity`
 //
-// note: we don't count `freed` (as |free|) instead of `used` to reduce
+// note: we don't count `freed` (as |free|) but use `used` to reduce
 //       the number of memory accesses in the `mi_page_all_free` function(s).
 // note: the funny layout here is due to:
 // - access is optimized for `mi_free` and `mi_page_alloc`
 // - using `uint16_t` does not seem to slow things down
+// - the size is 8 words on 64-bit which helps the page index calculations
+// - (and 10 words on 32-bit which is also good (since 10 == 2*(4+1))
 typedef struct mi_page_s {
   // "owned" by the segment
   uint8_t               segment_idx;       // index in the segment `pages` array, `page == &segment->pages[page->segment_idx]`
@@ -186,30 +191,25 @@ typedef struct mi_page_s {
   uint16_t              capacity;          // number of blocks committed, must be the first field, see `segment.c:page_clear`
   uint16_t              reserved;          // number of blocks reserved in memory
   mi_page_flags_t       flags;             // `in_full` and `has_aligned` flags (8 bits)
-  uint8_t               is_zero : 1;         // `true` if the blocks in the free list are zero initialized
-  uint8_t               retire_expire : 7;   // expiration count for retired blocks
+  uint8_t               is_zero : 1;       // `true` if the blocks in the free list are zero initialized
+  uint8_t               retire_expire : 7; // expiration count for retired blocks
 
-  mi_block_t* free;              // list of available free blocks (`malloc` allocates from this list)
+  mi_block_t*           free;              // list of available free blocks (`malloc` allocates from this list)
 #ifdef MI_ENCODE_FREELIST
   uintptr_t             key[2];            // two random keys to encode the free lists (see `_mi_block_next`)
 #endif
 
-  size_t                used;              // number of blocks in use (including blocks in `local_free` and `thread_free`)
-  
+  uint32_t              used;              // number of blocks in use (including blocks in `local_free` and `thread_free`)
+  uint32_t              xblock_size;       // size available in each block (always `>0`)
+
   mi_block_t*           local_free;        // list of deferred free blocks by this thread (migrates to `free`)
   volatile _Atomic(mi_thread_free_t) thread_free;   // list of deferred free blocks freed by other threads
 
   // less accessed info
-  size_t                block_size;        // size available in each block (always `>0`)
   mi_heap_t*            heap;              // the owning heap
   struct mi_page_s*     next;              // next page owned by this thread with the same `block_size`
   struct mi_page_s*     prev;              // previous page owned by this thread with the same `block_size`
 
-  // improve page index calculation
-  // without padding: 10 words on 64-bit, 11 on 32-bit. Secure adds two words
-  #if (MI_INTPTR_SIZE==4)
-  void*                 padding[1];        // 12/14 words on 32-bit plain
-  #endif
 } mi_page_t;
 
 
@@ -271,7 +271,7 @@ typedef struct mi_page_queue_s {
   size_t     block_size;
 } mi_page_queue_t;
 
-#define MI_BIN_FULL  (MI_BIN_HUGE+1)
+#define MI_BIN_FULL  (MI_BIN_LARGEST+1)
 
 // Random context
 typedef struct mi_random_cxt_s {
@@ -372,7 +372,7 @@ typedef struct mi_stats_s {
   mi_stat_counter_t huge_count;
   mi_stat_counter_t giant_count;
 #if MI_STAT>1
-  mi_stat_count_t normal[MI_BIN_HUGE+1];
+  mi_stat_count_t normal[MI_BIN_FULL];
 #endif
 } mi_stats_t;
 
