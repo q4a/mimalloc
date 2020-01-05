@@ -606,34 +606,19 @@ static void mi_page_init(mi_heap_t* heap, mi_page_t* page, size_t block_size, mi
 static mi_page_t* mi_page_queue_find_free_ex(mi_heap_t* heap, mi_page_queue_t* pq)
 {
   // search through the pages in "next fit" order
-  mi_page_t* rpage = NULL;
   size_t count = 0;
-  size_t page_free_count = 0;
   mi_page_t* page = pq->first;
-  while( page != NULL)
+  while (page != NULL)
   {
     mi_page_t* next = page->next; // remember next
     count++;
 
     // 0. collect freed blocks by us and other threads
-    _mi_page_free_collect(page,false);
+    _mi_page_free_collect(page, false);
 
     // 1. if the page contains free blocks, we are done
     if (mi_page_immediate_available(page)) {
-      // If all blocks are free, we might retire this page instead.
-      // do this at most 8 times to bound allocation time.
-      // (note: this can happen if a page was earlier not retired due
-      //  to having neighbours that were mostly full or due to concurrent frees)
-      if (page_free_count < 8 && mi_page_all_free(page)) {
-        page_free_count++;
-        if (rpage != NULL) _mi_page_free(rpage,pq,false);
-        rpage = page;
-        page = next;
-        continue;     // and keep looking
-      }
-      else {
-        break;  // pick this one
-      }
+      break;  // pick this one
     }
 
     // 2. Try to extend
@@ -646,20 +631,12 @@ static mi_page_t* mi_page_queue_find_free_ex(mi_heap_t* heap, mi_page_queue_t* p
     // 3. If the page is completely full, move it to the `mi_pages_full`
     // queue so we don't visit long-lived pages too often.
     mi_assert_internal(!mi_page_is_in_full(page) && !mi_page_immediate_available(page));
-    mi_page_to_full(page,pq);
+    mi_page_to_full(page, pq);
 
     page = next;
   } // for each page
 
-  mi_stat_counter_increase(heap->tld->stats.searches,count);
-
-  if (page == NULL) {
-    page = rpage;
-    rpage = NULL;
-  }
-  if (rpage != NULL) {
-    _mi_page_free(rpage,pq,false);
-  }
+  mi_stat_counter_increase(heap->tld->stats.searches, count);
 
   if (page == NULL) {
     page = mi_page_fresh(heap, pq);
@@ -671,7 +648,7 @@ static mi_page_t* mi_page_queue_find_free_ex(mi_heap_t* heap, mi_page_queue_t* p
   mi_assert_internal(page == NULL || mi_page_immediate_available(page));
 
   // finally collect retired pages
-  _mi_heap_collect_retired(heap,false);
+  _mi_heap_collect_retired(heap, false);
   return page;
 }
 
