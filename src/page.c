@@ -91,8 +91,8 @@ static bool mi_page_is_valid_init(mi_page_t* page) {
 
   mi_block_t* tfree = mi_tf_block(page->thread_free);
   mi_assert_internal(mi_page_list_is_valid(page, tfree));
-  size_t tfree_count = mi_page_list_count(page, tfree);
-  mi_assert_internal(tfree_count <= page->thread_freed + 1);
+  // size_t tfree_count = mi_page_list_count(page, tfree);
+  // mi_assert_internal(tfree_count <= page->thread_freed + 1);
 
   size_t free_count = mi_page_list_count(page, page->free) + mi_page_list_count(page, page->local_free);
   mi_assert_internal(page->used + free_count == page->capacity);
@@ -126,10 +126,8 @@ mi_delayed_t _mi_page_unset_delayed_freeing(mi_page_t* page, mi_delayed_t delay)
   do {
     tfreex = tfree = page->thread_free;
     old_delay = mi_tf_delayed(tfree);
-    mi_assert_internal(old_delay >= MI_DELAYED_FREEING);
-    if (old_delay != MI_NEVER_DELAYED_FREE) {
-      tfreex = mi_tf_set_delayed(tfree, delay);
-    }
+    mi_assert_internal(old_delay == MI_DELAYED_FREEING);
+    tfreex = mi_tf_set_delayed(tfree, delay);
   } while(!mi_atomic_cas_strong(mi_atomic_cast(uintptr_t, &page->thread_free), tfreex, tfree));
   return old_delay;
 }
@@ -178,8 +176,8 @@ static void _mi_page_thread_free_collect(mi_page_t* page)
   if (head == NULL) return;
 
   // find the tail -- also to get a proper count (without data races)
-  uintptr_t max_count = page->capacity; // cannot collect more than capacity
-  uintptr_t count = 1;
+  uint16_t max_count = page->capacity; // cannot collect more than capacity
+  uint16_t count = 1;
   mi_block_t* tail = head;
   mi_block_t* next;
   while ((next = mi_block_next(page,tail)) != NULL && count <= max_count) {
@@ -197,7 +195,6 @@ static void _mi_page_thread_free_collect(mi_page_t* page)
   page->local_free = head;
 
   // update counts now
-  mi_atomic_subu(&page->thread_freed, count);
   page->used -= count;
 }
 
@@ -302,8 +299,7 @@ void _mi_page_unfull(mi_page_t* page) {
   mi_assert_internal(page != NULL);
   mi_assert_expensive(_mi_page_is_valid(page));
   mi_assert_internal(mi_page_is_in_full(page));
-
-  _mi_page_use_delayed_free(page, MI_NO_DELAYED_FREE);
+  mi_assert_internal(!mi_page_all_free(page));
   if (!mi_page_is_in_full(page)) return;
 
   mi_heap_t* heap = page->heap;
@@ -319,11 +315,8 @@ static void mi_page_to_full(mi_page_t* page, mi_page_queue_t* pq) {
   mi_assert_internal(!mi_page_immediate_available(page));
   mi_assert_internal(!mi_page_is_in_full(page));
 
-  _mi_page_use_delayed_free(page, MI_USE_DELAYED_FREE);
   if (mi_page_is_in_full(page)) return;
-
   mi_page_queue_enqueue_from(&page->heap->pages[MI_BIN_FULL], pq, page);
-  _mi_page_free_collect(page,false);  // try to collect right away in case another thread freed just before MI_USE_DELAYED_FREE was set
 }
 
 // Free a page with no more free blocks
@@ -334,7 +327,7 @@ void _mi_page_free(mi_page_t* page, mi_page_queue_t* pq, bool force) {
   mi_assert_internal(mi_page_all_free(page));
   #if MI_DEBUG>1
   // check if we can safely free
-  mi_thread_free_t free = mi_tf_set_delayed(page->thread_free,MI_NEVER_DELAYED_FREE);
+  mi_thread_free_t free = mi_tf_set_delayed(page->thread_free,MI_NO_DELAYED_FREE);
   free = mi_atomic_exchange(&page->thread_free, free);
   mi_assert_internal(mi_tf_delayed(free) != MI_DELAYED_FREEING);
   #endif
@@ -382,7 +375,7 @@ void _mi_page_retire(mi_page_t* page) {
   // how to check this efficiently though...
   // for now, we don't retire if it is the only page left of this size class.
   mi_page_queue_t* pq = mi_page_queue_of(page);
-  if (mi_likely(page->block_size <= MI_SMALL_SIZE_MAX)) {
+  if (mi_likely(page->block_size <= MI_SMALL_SIZE_MAX && !mi_page_is_in_full(page))) {
     if (pq->last==page && pq->first==page) { // the only page in the queue?
       mi_stat_counter_increase(_mi_stats_main.page_no_retire,1);
       page->retire_expire = 4;
@@ -595,7 +588,6 @@ static void mi_page_init(mi_heap_t* heap, mi_page_t* page, size_t block_size, mi
   mi_assert_internal(page->free == NULL);
   mi_assert_internal(page->used == 0);
   mi_assert_internal(page->thread_free == 0);
-  mi_assert_internal(page->thread_freed == 0);
   mi_assert_internal(page->next == NULL);
   mi_assert_internal(page->prev == NULL);
   mi_assert_internal(page->retire_expire == 0);

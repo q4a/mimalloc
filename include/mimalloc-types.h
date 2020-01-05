@@ -136,10 +136,9 @@ typedef struct mi_block_s {
 
 // The delayed flags are used for efficient multi-threaded free-ing
 typedef enum mi_delayed_e {
-  MI_NO_DELAYED_FREE = 0,
-  MI_USE_DELAYED_FREE = 1,
-  MI_DELAYED_FREEING = 2,
-  MI_NEVER_DELAYED_FREE = 3
+  MI_USE_DELAYED_FREE = 0,
+  MI_NO_DELAYED_FREE  = 1,
+  MI_DELAYED_FREEING  = 2
 } mi_delayed_t;
 
 
@@ -178,26 +177,26 @@ typedef uintptr_t mi_thread_free_t;
 typedef struct mi_page_s {
   // "owned" by the segment
   uint8_t               segment_idx;       // index in the segment `pages` array, `page == &segment->pages[page->segment_idx]`
-  uint8_t               segment_in_use:1;  // `true` if the segment allocated this page
-  uint8_t               is_reset:1;        // `true` if the page memory was reset
-  uint8_t               is_committed:1;    // `true` if the page virtual memory is committed
-  uint8_t               is_zero_init:1;    // `true` if the page was zero initialized
+  uint8_t               segment_in_use : 1;  // `true` if the segment allocated this page
+  uint8_t               is_reset : 1;        // `true` if the page memory was reset
+  uint8_t               is_committed : 1;    // `true` if the page virtual memory is committed
+  uint8_t               is_zero_init : 1;    // `true` if the page was zero initialized
 
   // layout like this to optimize access in `mi_malloc` and `mi_free`
   uint16_t              capacity;          // number of blocks committed, must be the first field, see `segment.c:page_clear`
   uint16_t              reserved;          // number of blocks reserved in memory
   mi_page_flags_t       flags;             // `in_full` and `has_aligned` flags (8 bits)
-  uint8_t               is_zero:1;         // `true` if the blocks in the free list are zero initialized
-  uint8_t               retire_expire:7;   // expiration count for retired blocks
+  uint8_t               is_zero : 1;         // `true` if the blocks in the free list are zero initialized
+  uint8_t               retire_expire : 7;   // expiration count for retired blocks
 
-  mi_block_t*           free;              // list of available free blocks (`malloc` allocates from this list)
-  #ifdef MI_ENCODE_FREELIST
+  mi_block_t* free;              // list of available free blocks (`malloc` allocates from this list)
+#ifdef MI_ENCODE_FREELIST
   uintptr_t             key[2];            // two random keys to encode the free lists (see `_mi_block_next`)
-  #endif
-  size_t                used;              // number of blocks in use (including blocks in `local_free` and `thread_free`)
+#endif
 
+  size_t                used;              // number of blocks in use (including blocks in `local_free` and `thread_free`)
+  
   mi_block_t*           local_free;        // list of deferred free blocks by this thread (migrates to `free`)
-  volatile _Atomic(uintptr_t)        thread_freed;  // at least this number of blocks are in `thread_free`
   volatile _Atomic(mi_thread_free_t) thread_free;   // list of deferred free blocks freed by other threads
 
   // less accessed info

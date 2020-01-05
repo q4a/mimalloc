@@ -24,10 +24,10 @@ const mi_page_t _mi_page_empty = {
   #endif
   0,       // used
   NULL,
-  ATOMIC_VAR_INIT(0), ATOMIC_VAR_INIT(0),
+  ATOMIC_VAR_INIT(0), 
   0, NULL, NULL, NULL
   #if (MI_INTPTR_SIZE==4)
-  , { NULL } // padding
+  , { 0 }
   #endif
 };
 

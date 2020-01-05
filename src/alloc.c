@@ -221,8 +221,8 @@ static mi_decl_noinline void mi_free_block_mt(mi_page_t* page, mi_block_t* block
   // otherwise push on the thread free list
   do {
     tfree = page->thread_free;
-    use_delayed = (mi_tf_delayed(tfree) == MI_USE_DELAYED_FREE ||
-                   (mi_tf_delayed(tfree) == MI_NO_DELAYED_FREE && page->used == mi_atomic_read_relaxed(&page->thread_freed)+1)  // data-race but ok, just optimizes early release of the page
+    use_delayed = (mi_tf_delayed(tfree) == MI_USE_DELAYED_FREE
+                   // (mi_tf_delayed(tfree) == MI_NO_DELAYED_FREE && page->used == mi_atomic_read_relaxed(&page->thread_freed)+1)  // data-race but ok, just optimizes early release of the page
                   );
     if (mi_unlikely(use_delayed)) {
       // unlikely: this only happens on the first concurrent free in a page that is in the full list
@@ -235,11 +235,7 @@ static mi_decl_noinline void mi_free_block_mt(mi_page_t* page, mi_block_t* block
     }
   } while (!mi_atomic_cas_weak(mi_atomic_cast(uintptr_t,&page->thread_free), tfreex, tfree));
 
-  if (mi_likely(!use_delayed)) {
-    // increment the thread free count and return
-    mi_atomic_increment(&page->thread_freed);
-  }
-  else {
+  if (mi_unlikely(use_delayed)) {    
     // racy read on `heap`, but ok because MI_DELAYED_FREEING is set (see `mi_heap_delete` and `mi_heap_collect_abandon`)
     mi_heap_t* heap = (mi_heap_t*)mi_atomic_read_ptr(mi_atomic_cast(void*, &page->heap));
     mi_assert_internal(heap != NULL);
@@ -361,12 +357,18 @@ bool _mi_free_delayed_block(mi_block_t* block) {
   mi_assert_internal(_mi_ptr_cookie(segment) == segment->cookie);
   mi_assert_internal(_mi_thread_id() == segment->thread_id);
   mi_page_t* page = _mi_segment_page_of(segment, block);
+  // update delayed free flag so delayed freeing is used again
+  _mi_page_use_delayed_free(page, MI_USE_DELAYED_FREE);
+  // collect all other non-local frees to ensure up-to-date `used` count
+  _mi_page_free_collect(page, false);
+  /*
   if (mi_tf_delayed(page->thread_free) == MI_DELAYED_FREEING) {
     // we might already start delayed freeing while another thread has not yet
     // reset the delayed_freeing flag; in that case don't free it quite yet if
     // this is the last block remaining.
-    if (page->used - page->thread_freed == 1) return false;
+    if (page->used == 1) return false;
   }
+  */
   mi_free_block(page,true,block);
   return true;
 }

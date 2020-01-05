@@ -250,8 +250,8 @@ static bool _mi_heap_page_destroy(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_
   UNUSED(heap);
   UNUSED(pq);
 
-  // ensure no more thread_delayed_free will be added
-  _mi_page_use_delayed_free(page, MI_NEVER_DELAYED_FREE);  
+  // TODO: ensure no more thread_delayed_free will be added?
+  // _mi_page_use_delayed_free(page, MI_NEVER_DELAYED_FREE);  
 
   // stats
   if (page->block_size > MI_LARGE_OBJ_SIZE_MAX) {
@@ -263,7 +263,8 @@ static bool _mi_heap_page_destroy(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_
     }
   }
   #if (MI_STAT>1)
-  size_t inuse = page->used - page->thread_freed;
+  _mi_page_free_collect(page, false);  // update used count
+  size_t inuse = page->used;
   if (page->block_size <= MI_LARGE_OBJ_SIZE_MAX)  {
     mi_heap_stat_decrease(heap,normal[_mi_bin(page->block_size)], inuse);
   }
@@ -271,8 +272,8 @@ static bool _mi_heap_page_destroy(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_
   #endif
 
   // pretend it is all free now
-  mi_assert_internal(page->thread_freed<=0xFFFF);
-  page->used = (uint16_t)page->thread_freed;
+  mi_assert_internal(mi_tf_block(page->thread_free) == NULL);
+  page->used = 0;
 
   // and free the page
   _mi_segment_page_free(page,false /* no force? */, &heap->tld->segments);
@@ -506,13 +507,14 @@ typedef bool (mi_heap_area_visit_fun)(const mi_heap_t* heap, const mi_heap_area_
 static bool mi_heap_visit_areas_page(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_t* page, void* vfun, void* arg) {
   UNUSED(heap);
   UNUSED(pq);
+  _mi_page_free_collect(page, false); // update used
   mi_heap_area_visit_fun* fun = (mi_heap_area_visit_fun*)vfun;
   mi_heap_area_ex_t xarea;
   xarea.page = page;
   xarea.area.reserved = page->reserved * page->block_size;
   xarea.area.committed = page->capacity * page->block_size;
   xarea.area.blocks = _mi_page_start(_mi_page_segment(page), page, NULL);
-  xarea.area.used  = page->used - page->thread_freed; // race is ok
+  xarea.area.used  = page->used;
   xarea.area.block_size = page->block_size;
   return fun(heap, &xarea, arg);
 }

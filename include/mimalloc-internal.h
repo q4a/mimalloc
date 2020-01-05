@@ -342,7 +342,7 @@ static inline mi_thread_free_t mi_tf_set_block(mi_thread_free_t tf, mi_block_t* 
 // are all blocks in a page freed?
 static inline bool mi_page_all_free(const mi_page_t* page) {
   mi_assert_internal(page != NULL);
-  return (page->used - page->thread_freed == 0);
+  return (page->used == 0);
 }
 
 // are there immediately available blocks
@@ -354,7 +354,7 @@ static inline bool mi_page_immediate_available(const mi_page_t* page) {
 static inline bool mi_page_has_free(mi_page_t* page) {
   mi_assert_internal(page != NULL);
   bool hasfree = (mi_page_immediate_available(page) || page->local_free != NULL || (mi_tf_block(page->thread_free) != NULL));
-  mi_assert_internal(hasfree || page->used - page->thread_freed == page->capacity);
+  mi_assert_internal(hasfree || page->used == page->capacity);
   return hasfree;
 }
 
@@ -368,7 +368,7 @@ static inline bool mi_page_all_used(mi_page_t* page) {
 static inline bool mi_page_mostly_used(const mi_page_t* page) {
   if (page==NULL) return true;
   uint16_t frac = page->reserved / 8U;
-  return (page->reserved - page->used + page->thread_freed <= frac);
+  return (page->reserved - page->used  <= frac);
 }
 
 static inline mi_page_queue_t* mi_page_queue(const mi_heap_t* heap, size_t size) {
