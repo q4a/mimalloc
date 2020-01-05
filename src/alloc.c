@@ -174,42 +174,51 @@ static inline bool mi_check_is_double_free(const mi_page_t* page, const mi_block
 
 
 // ------------------------------------------------------
-// Free
+// Free  
 // ------------------------------------------------------
 
+// free huge block from another thread
+static mi_decl_noinline void mi_free_huge_block_mt(mi_segment_t* segment, mi_page_t* page, mi_block_t* block) {
+  // huge page segments are always abandoned and can be freed immediately
+  mi_assert_internal(segment->page_kind==MI_PAGE_HUGE);
+  mi_assert_internal(segment == _mi_page_segment(page));
+  mi_assert_internal(mi_atomic_read_relaxed(&segment->thread_id)==0);
+
+  // claim it and free
+  mi_heap_t* heap = mi_get_default_heap();
+  // paranoia: if this it the last reference, the cas should always succeed
+  if (mi_atomic_cas_strong(&segment->thread_id, heap->thread_id, 0)) {
+    mi_block_set_next(page, block, page->free);
+    page->free = block;
+    page->used--;
+    page->is_zero = false;
+    mi_assert(page->used == 0);
+    mi_tld_t* tld = heap->tld;
+    if (page->block_size > MI_HUGE_OBJ_SIZE_MAX) {
+      _mi_stat_decrease(&tld->stats.giant, page->block_size);
+    }
+    else {
+      _mi_stat_decrease(&tld->stats.huge, page->block_size);
+    }
+    _mi_segment_page_free(page, true, &tld->segments);
+  }
+}
+
 // multi-threaded free
-static mi_decl_noinline void _mi_free_block_mt(mi_page_t* page, mi_block_t* block)
+static mi_decl_noinline void mi_free_block_mt(mi_page_t* page, mi_block_t* block)
 {
   mi_thread_free_t tfree;
   mi_thread_free_t tfreex;
   bool use_delayed;
 
+  // huge page segments are always abandoned and can be freed immediately
   mi_segment_t* segment = _mi_page_segment(page);
   if (segment->page_kind==MI_PAGE_HUGE) {
-    // huge page segments are always abandoned and can be freed immediately
-    mi_assert_internal(mi_atomic_read_relaxed(&segment->thread_id)==0);
-
-    // claim it and free
-    mi_heap_t* heap = mi_get_default_heap();
-    // paranoia: if this it the last reference, the cas should always succeed
-    if (mi_atomic_cas_strong(&segment->thread_id,heap->thread_id,0)) {
-      mi_block_set_next(page, block, page->free);
-      page->free = block;
-      page->used--;
-      page->is_zero = false;
-      mi_assert(page->used == 0);
-      mi_tld_t* tld = heap->tld;
-      if (page->block_size > MI_HUGE_OBJ_SIZE_MAX) {
-        _mi_stat_decrease(&tld->stats.giant, page->block_size);
-      }
-      else {
-        _mi_stat_decrease(&tld->stats.huge, page->block_size);
-      }
-      _mi_segment_page_free(page,true,&tld->segments);
-    }
+    mi_free_huge_block_mt(segment, page, block);
     return;
   }
 
+  // otherwise push on the thread free list
   do {
     tfree = page->thread_free;
     use_delayed = (mi_tf_delayed(tfree) == MI_USE_DELAYED_FREE ||
@@ -250,7 +259,7 @@ static mi_decl_noinline void _mi_free_block_mt(mi_page_t* page, mi_block_t* bloc
 
 
 // regular free
-static inline void _mi_free_block(mi_page_t* page, bool local, mi_block_t* block)
+static inline void mi_free_block(mi_page_t* page, bool local, mi_block_t* block)
 {
   #if (MI_DEBUG)
   memset(block, MI_DEBUG_FREED, page->block_size);
@@ -271,7 +280,7 @@ static inline void _mi_free_block(mi_page_t* page, bool local, mi_block_t* block
     }
   }
   else {
-    _mi_free_block_mt(page,block);
+    mi_free_block_mt(page,block);
   }
 }
 
@@ -287,7 +296,7 @@ mi_block_t* _mi_page_ptr_unalign(const mi_segment_t* segment, const mi_page_t* p
 
 static void mi_decl_noinline mi_free_generic(const mi_segment_t* segment, mi_page_t* page, bool local, void* p) {
   mi_block_t* block = (mi_page_has_aligned(page) ? _mi_page_ptr_unalign(segment, page, p) : (mi_block_t*)p);
-  _mi_free_block(page, local, block);
+  mi_free_block(page, local, block);
 }
 
 // Free a block
@@ -358,7 +367,7 @@ bool _mi_free_delayed_block(mi_block_t* block) {
     // this is the last block remaining.
     if (page->used - page->thread_freed == 1) return false;
   }
-  _mi_free_block(page,true,block);
+  mi_free_block(page,true,block);
   return true;
 }
 
