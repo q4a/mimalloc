@@ -92,11 +92,8 @@ void       _mi_page_abandon(mi_page_t* page, mi_page_queue_t* pq);            //
 void       _mi_heap_delayed_free(mi_heap_t* heap);
 void       _mi_heap_collect_retired(mi_heap_t* heap, bool force);
 
-mi_delayed_t _mi_page_use_delayed_free(mi_page_t* page, mi_delayed_t delay);
-mi_delayed_t _mi_page_unset_delayed_freeing(mi_page_t* page, mi_delayed_t delay);
-
-size_t       _mi_page_queue_append(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_queue_t* append);
-void         _mi_deferred_free(mi_heap_t* heap, bool force);
+size_t     _mi_page_queue_append(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_queue_t* append);
+void       _mi_deferred_free(mi_heap_t* heap, bool force);
 
 void       _mi_page_free_collect(mi_page_t* page,bool force);
 void       _mi_page_reclaim(mi_heap_t* heap, mi_page_t* page);   // callback from segments
@@ -336,21 +333,17 @@ static inline size_t mi_page_block_size(const mi_page_t* page) {
   }
 }
 
-// Thread free access
-static inline mi_block_t* mi_tf_block(mi_thread_free_t tf) {
-  return (mi_block_t*)(tf & ~0x03);
+// Heap access: the bottom bit is the set when the heap is locked for reading
+static inline mi_heap_t* mi_page_heap(const mi_page_t* page) {
+  return (mi_heap_t*)(mi_atomic_read_relaxed(&page->xheap) & ~1);
 }
-static inline mi_delayed_t mi_tf_delayed(mi_thread_free_t tf) {
-  return (mi_delayed_t)(tf & 0x03);
-}
-static inline mi_thread_free_t mi_tf_make(mi_block_t* block, mi_delayed_t delayed) {
-  return (mi_thread_free_t)((uintptr_t)block | (uintptr_t)delayed);
-}
-static inline mi_thread_free_t mi_tf_set_delayed(mi_thread_free_t tf, mi_delayed_t delayed) {
-  return mi_tf_make(mi_tf_block(tf),delayed);
-}
-static inline mi_thread_free_t mi_tf_set_block(mi_thread_free_t tf, mi_block_t* block) {
-  return mi_tf_make(block, mi_tf_delayed(tf));
+
+// Thread free access:
+// The bottom bit is set if no-delayed-free is needed; this is 
+// the case if at least one block in the page will be added or is already added, 
+// to the thread_delayed_free list of the owning heap.
+static inline mi_block_t* mi_page_thread_free(const mi_page_t* page) {
+  return (mi_block_t*)(mi_atomic_read_relaxed(&page->xthread_free) & ~1);
 }
 
 // are all blocks in a page freed?
@@ -367,7 +360,7 @@ static inline bool mi_page_immediate_available(const mi_page_t* page) {
 // are there free blocks in this page?
 static inline bool mi_page_has_free(mi_page_t* page) {
   mi_assert_internal(page != NULL);
-  bool hasfree = (mi_page_immediate_available(page) || page->local_free != NULL || (mi_tf_block(page->thread_free) != NULL));
+  bool hasfree = (mi_page_immediate_available(page) || page->local_free != NULL || (page->xthread_free&~1) != 0);
   mi_assert_internal(hasfree || page->used == page->capacity);
   return hasfree;
 }

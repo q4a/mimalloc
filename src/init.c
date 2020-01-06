@@ -25,8 +25,9 @@ const mi_page_t _mi_page_empty = {
   0,       // used
   0,       // block_size
   NULL,
-  ATOMIC_VAR_INIT(0), 
-  NULL, NULL, NULL
+  ATOMIC_VAR_INIT(0),
+  ATOMIC_VAR_INIT(0),
+  NULL, NULL
 };
 
 #define MI_PAGE_EMPTY() ((mi_page_t*)&_mi_page_empty)

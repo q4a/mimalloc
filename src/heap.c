@@ -35,7 +35,7 @@ static bool mi_heap_visit_pages(mi_heap_t* heap, heap_page_visitor_fun* fn, void
     mi_page_t* page = pq->first;
     while(page != NULL) {
       mi_page_t* next = page->next; // save next in case the page gets removed from the queue
-      mi_assert_internal(page->heap == heap);
+      mi_assert_internal(mi_page_heap(page) == heap);
       count++;
       if (!fn(heap, pq, page, arg1, arg2)) return false;
       page = next; // and continue
@@ -51,7 +51,7 @@ static bool mi_heap_page_is_valid(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_
   UNUSED(arg1);
   UNUSED(arg2);
   UNUSED(pq);
-  mi_assert_internal(page->heap == heap);
+  mi_assert_internal(mi_page_heap(page) == heap);
   mi_segment_t* segment = _mi_page_segment(page);
   mi_assert_internal(segment->thread_id == heap->thread_id);
   mi_assert_expensive(_mi_page_is_valid(page));
@@ -273,7 +273,7 @@ static bool _mi_heap_page_destroy(mi_heap_t* heap, mi_page_queue_t* pq, mi_page_
   #endif
 
   // pretend it is all free now
-  mi_assert_internal(mi_tf_block(page->thread_free) == NULL);
+  mi_assert_internal(mi_page_thread_free(page) == NULL);
   page->used = 0;
 
   // and free the page
@@ -318,7 +318,7 @@ static void mi_heap_absorb(mi_heap_t* heap, mi_heap_t* from) {
 
   // transfer all pages by appending the queues; this will set
   // a new heap pointer in the page; this is ok but it means other 
-  // threads may add to either heap's `thread_delayed_free` list.
+  // threads may add to either heap's `thread_delayed_free` list during this time.
   for (size_t i = 0; i <= MI_BIN_FULL; i++) {
     mi_page_queue_t* pq = &heap->pages[i];
     mi_page_queue_t* append = &from->pages[i];
@@ -330,7 +330,7 @@ static void mi_heap_absorb(mi_heap_t* heap, mi_heap_t* from) {
   // Now append the `thread_delayed_free` list atomically
   mi_block_t* first;
   do {
-    first = (mi_block_t*)from->thread_delayed_free;
+    first = (mi_block_t*)mi_atomic_read_ptr_relaxed(mi_atomic_cast(void*, &from->thread_delayed_free));
   } while (!mi_atomic_cas_ptr_strong(mi_atomic_cast(void*, &from->thread_delayed_free), NULL, first));
   if (first != NULL) {
     // find the end and re-encode the list
@@ -340,10 +340,10 @@ static void mi_heap_absorb(mi_heap_t* heap, mi_heap_t* from) {
       mi_block_set_nextx(heap, last, next, heap->key[0], heap->key[1]); // re-encode
       last = next;
     }
-    // now append the heap thread_delayed_free list
+    // and append to the heap thread_delayed_free list
     mi_block_t* block;
     do {
-      block = (mi_block_t*)heap->thread_delayed_free;
+      block = (mi_block_t*)mi_atomic_read_ptr_relaxed(mi_atomic_cast(void*,&heap->thread_delayed_free));
       mi_block_set_nextx(heap, last, block, heap->key[0], heap->key[1]); // append
     } while(!mi_atomic_cas_ptr_strong(mi_atomic_cast(void*, &heap->thread_delayed_free), first, block));
   }
@@ -397,7 +397,7 @@ static mi_heap_t* mi_heap_of_block(const void* p) {
   bool valid = (_mi_ptr_cookie(segment) == segment->cookie);
   mi_assert_internal(valid);
   if (mi_unlikely(!valid)) return NULL;
-  return _mi_segment_page_of(segment,p)->heap;
+  return mi_page_heap(_mi_segment_page_of(segment,p));
 }
 
 bool mi_heap_contains_block(mi_heap_t* heap, const void* p) {
@@ -462,7 +462,7 @@ static bool mi_heap_area_visit_blocks(const mi_heap_area_ex_t* xarea, mi_block_v
   if (page->capacity == 1) {
     // optimize page with one block
     mi_assert_internal(page->used == 1 && page->free == NULL);
-    return visitor(page->heap, area, pstart, bsize, arg);
+    return visitor(mi_page_heap(page), area, pstart, bsize, arg);
   }
 
   // create a bitmap of free blocks.
@@ -496,7 +496,7 @@ static bool mi_heap_area_visit_blocks(const mi_heap_area_ex_t* xarea, mi_block_v
     else if ((m & ((uintptr_t)1 << bit)) == 0) {
       used_count++;
       uint8_t* block = pstart + (i * bsize);
-      if (!visitor(page->heap, area, block, bsize, arg)) return false;
+      if (!visitor(mi_page_heap(page), area, block, bsize, arg)) return false;
     }
   }
   mi_assert_internal(page->used == used_count);
