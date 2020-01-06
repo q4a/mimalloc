@@ -134,7 +134,7 @@ static void _mi_page_thread_free_collect(mi_page_t* page)
   uintptr_t tfree,tfreex;
   do {
     tfree  = mi_atomic_read_relaxed(&page->xthread_free);
-    tfreex = (tfree&1); // set to NULL but keep the no-delayed-free bit 
+    tfreex = (tfree&1); // set to NULL but keep the no-delayed-free bit
   } while (!mi_atomic_cas_weak(&page->xthread_free, tfreex, tfree));
 
   // return if the list is empty
@@ -298,7 +298,7 @@ void _mi_page_free(mi_page_t* page, mi_page_queue_t* pq, bool force) {
   mi_assert_internal((mi_atomic_read_relaxed(&page->xheap)&1)==0);
 
   mi_page_set_has_aligned(page, false);
-  
+
   // remove from the page list
   // (no need to do _mi_heap_delayed_free first as all blocks are already free)
   mi_segments_tld_t* segments_tld = &mi_page_heap(page)->tld->segments;
@@ -379,7 +379,7 @@ static void mi_page_free_list_extend_secure(mi_heap_t* const heap, mi_page_t* co
   mi_assert_internal(page->capacity + extend <= page->reserved);
   mi_assert_internal(bsize == mi_page_block_size(page));
   void* const page_area = _mi_page_start(_mi_page_segment(page), page, NULL);
-  
+
   // initialize a randomized free list
   // set up `slice_count` slices to alternate between
   size_t shift = MI_MAX_SLICE_SHIFT;
@@ -538,7 +538,7 @@ static void mi_page_init(mi_heap_t* heap, mi_page_t* page, size_t block_size, mi
   page->key[1] = _mi_heap_random_next(heap);
   #endif
   page->is_zero = page->is_zero_init;
-  
+
   mi_assert_internal(page->capacity == 0);
   mi_assert_internal(page->free == NULL);
   mi_assert_internal(page->used == 0);
@@ -631,6 +631,8 @@ static inline mi_page_t* mi_find_free_page(mi_heap_t* heap, size_t size) {
       return page; // fast path
     }
   }
+  // absorb another abondoned heap?
+  _mi_heap_try_reclaim_abandoned(heap);
   return mi_page_queue_find_free_ex(heap, pq);
 }
 
@@ -705,9 +707,6 @@ void* _mi_malloc_generic(mi_heap_t* heap, size_t size) mi_attr_noexcept
 
   // call potential deferred free routines
   _mi_deferred_free(heap, false);
-
-  // absorb another abondoned heap?
-  _mi_heap_try_reclaim_abandoned(heap);
 
   // free delayed frees from other threads
   _mi_heap_delayed_free(heap);
