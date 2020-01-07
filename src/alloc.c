@@ -379,8 +379,9 @@ bool _mi_free_delayed_block(mi_block_t* block) {
   
   // Clear the no-delayed free bit so delayed freeing is used again for this page.
   // This must be done before collecting the free lists on this page -- otherwise
-  // some blocks may end up in the page thread free list with no blocks in the
-  // delayed free list which may cause the page to be never freed!
+  // some blocks may end up in the page `thread_free` list with no blocks in the
+  // heap `thread_delayed_free` list which may cause the page to be never freed!
+  // (it would only be freed if we happen to scan it in `mi_page_queue_find_free_ex`)
   uintptr_t tfree;
   do {
     tfree = mi_atomic_read_relaxed(&page->xthread_free);
@@ -394,7 +395,8 @@ bool _mi_free_delayed_block(mi_block_t* block) {
   // A concurrent thread may push a thread_delayed_free block and
   // switch to the owning thread which frees it while the read lock
   // is not yet released. If this is the last block that would free
-  // the page we hold off and re-insert the block in threat_delayed_free
+  // the page we hold off (to prevent concurrent access to the page's 
+  // `xheap` field) and re-insert the block in thread_delayed_free
   // list to be freed the next time around.
   if (page->used==1 && (mi_atomic_read(&page->xheap)&1) != 0) return false;
 
