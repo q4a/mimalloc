@@ -104,7 +104,7 @@ uint8_t    _mi_bsr(uintptr_t x);                // bit-scan-right, used on BSD i
 
 // "heap.c"
 void       _mi_heap_collect_abandon(mi_heap_t* heap);
-bool       _mi_heap_try_reclaim_abandoned(mi_heap_t* heap);
+void       _mi_heap_try_reclaim_abandoned(mi_heap_t* heap, bool all);
 void       _mi_heap_destroy_pages(mi_heap_t* heap);
 uintptr_t  _mi_heap_random(mi_heap_t* heap);
 void       _mi_heap_set_default_direct(mi_heap_t* heap);

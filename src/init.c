@@ -205,7 +205,7 @@ static bool _mi_heap_done(mi_heap_t* heap) {
 #if MI_DEBUG 
   else {
     // free all memory
-    while(_mi_heap_try_reclaim_abandoned(heap)) { } // absorb all outstanding abandoned heaps
+    _mi_heap_try_reclaim_abandoned(heap, true /* absorb all outstanding abandoned heaps */);
     mi_heap_collect(heap,true);
   }
 #endif

@@ -98,7 +98,7 @@ static void mi_heap_collect_ex(mi_heap_t* heap, mi_collect_t collect)
   _mi_deferred_free(heap, collect > NORMAL);
 
   // absorb outstanding abandoned heaps (but not when abandoning)
-  while (_mi_heap_try_reclaim_abandoned(heap) && collect == FORCE) { /* nothing */ }
+  _mi_heap_try_reclaim_abandoned(heap, collect == FORCE /* all outstanding? */);
   
   // free thread delayed blocks. 
   _mi_heap_delayed_free(heap);
@@ -132,10 +132,36 @@ void mi_collect(bool force) mi_attr_noexcept {
 
 /* -----------------------------------------------------------
   Heap abandon
+  When a thread terminates its backing heap is put in 
+  a global abandoned list (if it still has live objects).
+  Heaps in this list are reclaimed into the heaps of
+  other threads on demand.
 ----------------------------------------------------------- */
 
 static volatile _Atomic(mi_heap_t*) abandoned; // = NULL
 
+// prepend a list of abondoned heaps atomically to the global abandoned list; O(n)
+static void mi_heap_prepend_abandoned(mi_heap_t* first) {
+  if (first == NULL) return;
+
+  // first try if the abandoned list happens to be NULL
+  if (mi_atomic_cas_ptr_weak(mi_atomic_cast(void*, &abandoned), first, NULL)) return;
+
+  // if not, find the end 
+  mi_heap_t* last = first;
+  while (last->abandoned_next != NULL) {
+    last = last->abandoned_next;
+  }
+
+  // and atomically prepend
+  mi_heap_t* next;
+  do {
+    next = (mi_heap_t*)mi_atomic_read_ptr_relaxed(mi_atomic_cast(void*, &abandoned));
+    last->abandoned_next = next;
+  } while (!mi_atomic_cas_ptr_weak(mi_atomic_cast(void*, &abandoned), first, next));
+}
+
+// Release resources for a heap that is about to be abandoned (due to thread termination)
 void _mi_heap_collect_abandon(mi_heap_t* heap) 
 {
   mi_assert_internal(mi_heap_is_backing(heap));
@@ -149,29 +175,41 @@ void _mi_heap_collect_abandon(mi_heap_t* heap)
   }
   else {
     // still live objects: push on the abandoned list
-    mi_heap_t* next;
-    do {
-      next = (mi_heap_t*)mi_atomic_read_ptr_relaxed(mi_atomic_cast(void*, &abandoned));
-      heap->abandoned_next = next;
-    } while (!mi_atomic_cas_ptr_strong(mi_atomic_cast(void*, &abandoned), heap, next));
+    heap->abandoned_next = NULL;
+    mi_heap_prepend_abandoned(heap);  // a one-element list
   }
 }
 
 static void mi_heap_absorb(mi_heap_t* to, mi_heap_t* from);
 
-bool _mi_heap_try_reclaim_abandoned(mi_heap_t* heap) {
-  if (heap->no_reclaim) return false;
-  mi_heap_t* reclaim;
-  do {
-    reclaim = (mi_heap_t*)mi_atomic_read_ptr_relaxed(mi_atomic_cast(void*, &abandoned));
-    if (reclaim == NULL) return false;
-  } while (!mi_atomic_cas_ptr_strong(mi_atomic_cast(void*, &abandoned), reclaim->abandoned_next, reclaim));
-  reclaim->abandoned_next = NULL;
+// Try to reclaim an abandoned heap by absorbing it
+void _mi_heap_try_reclaim_abandoned(mi_heap_t* heap, bool all) {
+  if (heap->no_reclaim) return;
 
-  mi_heap_absorb(heap, reclaim);
-  _mi_segments_absorb(heap->thread_id, &heap->tld->segments, &reclaim->tld->segments);
-  _mi_heap_backing_free(reclaim);
-  return true;
+  // To avoid the A-B-A problem, grab the entire list atomically
+  mi_heap_t* reclaim = (mi_heap_t*)mi_atomic_read_ptr_relaxed(mi_atomic_cast(void*, &abandoned));  // pre-read to avoid expensive atomic operations
+  if (reclaim == NULL) return;
+  reclaim = (mi_heap_t*)mi_atomic_exchange_ptr(mi_atomic_cast(void*, &abandoned), NULL);
+  if (reclaim == NULL) return;
+
+  // we got a non-empty list
+  if (!all) {
+    // pop one, and append the rest back to the abandoned list again
+    // this is O(n) but simplifies the code a lot (as we don't have an A-B-A problem)
+    // and probably ok since the length will tend to be small.
+    mi_heap_t* next = reclaim->abandoned_next;  // next can be NULL
+    reclaim->abandoned_next = NULL;
+    mi_heap_prepend_abandoned(next);
+  }
+
+  // and absorb all the heaps we got
+  do {
+    mi_heap_t* next = reclaim->abandoned_next; // save next one
+    mi_heap_absorb(heap, reclaim);
+    _mi_segments_absorb(heap->thread_id, &heap->tld->segments, &reclaim->tld->segments);
+    _mi_heap_backing_free(reclaim);
+    reclaim = next;
+  } while (reclaim != NULL);
 }
 
 /* -----------------------------------------------------------

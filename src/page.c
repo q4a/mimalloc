@@ -632,7 +632,7 @@ static inline mi_page_t* mi_find_free_page(mi_heap_t* heap, size_t size) {
     }
   }
   // absorb another abondoned heap?
-  _mi_heap_try_reclaim_abandoned(heap);
+  _mi_heap_try_reclaim_abandoned(heap,false /*absorb at most one*/);
   return mi_page_queue_find_free_ex(heap, pq);
 }
 
