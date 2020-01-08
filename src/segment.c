@@ -216,8 +216,8 @@ static void mi_segment_protect(mi_segment_t* segment, bool protect, mi_os_tld_t*
   Page reset
 ----------------------------------------------------------- */
 
-static void mi_page_reset(mi_segment_t* segment, mi_page_t* page, size_t size, mi_segments_tld_t* tld) {
-  if (!mi_option_is_enabled(mi_option_page_reset)) return;
+static void mi_page_reset(mi_segment_t* segment, mi_page_t* page, size_t size, bool force, mi_segments_tld_t* tld) {
+  if (!force && !mi_option_is_enabled(mi_option_page_reset)) return;
   if (segment->mem_is_fixed || page->segment_in_use || page->is_reset) return;
   size_t psize;
   void* start = mi_segment_raw_page_start(segment, page, &psize);
@@ -246,6 +246,21 @@ static void mi_page_unreset(mi_segment_t* segment, mi_page_t* page, size_t size,
   bool is_zero = false;
   _mi_mem_unreset(start, unreset_size, &is_zero, tld->os);
   if (is_zero) page->is_zero_init = true;
+}
+
+
+static void mi_segments_reset_pages(mi_segment_t* segment, mi_segments_tld_t* tld) {
+  while (segment != NULL) {
+    if (!segment->mem_is_fixed) {
+      for (size_t i = 0; i < segment->capacity; i++) {
+        mi_page_t* page = &segment->pages[i];
+        if (!page->segment_in_use && !page->is_reset) {
+          mi_page_reset(segment, page, 0 /*full page*/, true /*force*/, tld);
+        }
+      }
+    }
+    segment = segment->next;
+  }
 }
 
 
@@ -421,6 +436,7 @@ static bool mi_segment_cache_push(mi_segment_t* segment, mi_segments_tld_t* tld)
   return true;
 }
 
+
 // called by threads that are terminating to free cached segments
 void _mi_segment_thread_collect(mi_segments_tld_t* tld) {
   mi_segment_t* segment;
@@ -429,6 +445,12 @@ void _mi_segment_thread_collect(mi_segments_tld_t* tld) {
   }
   mi_assert_internal(tld->cache_count == 0);
   mi_assert_internal(tld->cache == NULL);
+
+  // reset all free pages too
+  if (mi_option_is_enabled(mi_option_abandoned_page_reset) && !mi_option_is_enabled(mi_option_page_reset)) {
+    mi_segments_reset_pages(tld->small_free.first, tld);
+    mi_segments_reset_pages(tld->medium_free.first, tld);
+  }
 }
 
 
@@ -641,7 +663,7 @@ static void mi_segment_page_clear(mi_segment_t* segment, mi_page_t* page, mi_seg
 
   // reset the page memory to reduce memory pressure?
   // note: must come after setting `segment_in_use` to false but before block_size becomes 0
-  mi_page_reset(segment, page, 0 /*used_size*/, tld);
+  mi_page_reset(segment, page, 0 /*used_size*/, false /*force*/, tld);
 
   // zero the page data, but not the segment fields
   ptrdiff_t ofs = offsetof(mi_page_t,capacity);
