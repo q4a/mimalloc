@@ -38,7 +38,7 @@ static uint8_t* mi_segment_raw_page_start(const mi_segment_t* segment, const mi_
   Queue of segments containing free pages
 ----------------------------------------------------------- */
 
-#if (MI_DEBUG>=3)
+#if (MI_DEBUG>=2)
 static bool mi_segment_queue_contains(const mi_segment_queue_t* queue, mi_segment_t* segment) {
   mi_assert_internal(segment != NULL);
   mi_segment_t* list = queue->first;
