@@ -83,7 +83,7 @@ terms of the MIT license. A copy of the license can be found in the file
 // This is not really necessary as they usually call
 // malloc/free anyway, but it improves performance.
 // ------------------------------------------------------
-#ifdef __cplusplus
+#if defined(__cplusplus) && !defined(MI_MALLOC_NO_NEW_OVERRIDE)
   // ------------------------------------------------------
   // With a C++ compiler we override the new/delete operators.
   // see <https://en.cppreference.com/w/cpp/memory/new/operator_new>
@@ -115,7 +115,7 @@ terms of the MIT license. A copy of the license can be found in the file
   void* operator new[](std::size_t n, std::align_val_t al, const std::nothrow_t&) noexcept { return mi_new_aligned_nothrow(n, static_cast<size_t>(al)); }
   #endif
 
-#elif (defined(__GNUC__) || defined(__clang__))
+#elif (defined(__GNUC__) || defined(__clang__)) && !defined(MI_MALLOC_NO_NEW_OVERRIDE)
   // ------------------------------------------------------
   // Override by defining the mangled C++ names of the operators (as
   // used by GCC and CLang).
