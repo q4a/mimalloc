@@ -188,7 +188,7 @@ if(MI_BUILD_DYNAMIC MATCHES "ON")
         COMMAND "${CMAKE_COMMAND}" -E copy "${CMAKE_CURRENT_SOURCE_DIR}/bin/mimalloc-redirect.dll" $<TARGET_FILE_DIR:mimalloc>
         COMMENT "Copy mimalloc-redirect.dll to output directory")
   endif()
-endif(MI_BUILD_DYNAMIC)
+endif()
 
 # static library
 if(MI_BUILD_STATIC MATCHES "ON")
@@ -208,17 +208,17 @@ if(MI_BUILD_STATIC MATCHES "ON")
   else()
     set_target_properties(mimalloc-static PROPERTIES OUTPUT_NAME ${mi_basename})
   endif()
-endif(MI_BUILD_STATIC)
+endif()
 
 # install static and shared library, and the include files
 if(MI_SKIP_INSTALL MATCHES "OFF")
   if(MI_BUILD_DYNAMIC MATCHES "ON")
     install(TARGETS mimalloc EXPORT mimalloc DESTINATION ${mi_install_dir} LIBRARY)
-  endif(MI_BUILD_DYNAMIC)
+  endif()
 
   if(MI_BUILD_STATIC MATCHES "ON")
     install(TARGETS mimalloc-static EXPORT mimalloc DESTINATION ${mi_install_dir})
-  endif(MI_BUILD_STATIC)
+  endif()
   install(FILES include/mimalloc.h DESTINATION ${mi_install_dir}/include)
   install(FILES include/mimalloc-override.h DESTINATION ${mi_install_dir}/include)
   install(FILES include/mimalloc-new-delete.h DESTINATION ${mi_install_dir}/include)
@@ -233,7 +233,7 @@ if(MI_SKIP_INSTALL MATCHES "OFF")
     install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ${mi_soname} ${mi_symlink} WORKING_DIRECTORY ${CMAKE_INSTALL_PREFIX}/${mi_install_dir}/..)")
     install(CODE "MESSAGE(\"-- Symbolic link: ${CMAKE_INSTALL_PREFIX}/lib/${mi_symlink} -> ${mi_soname}\")")
   endif()
-endif(MI_SKIP_INSTALL)
+endif()
 
 # single object file for more predictable static overriding
 if(MI_BUILD_STATIC MATCHES "ON")
@@ -253,8 +253,8 @@ if(MI_BUILD_STATIC MATCHES "ON")
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/mimalloc-obj.dir/src/static.c${CMAKE_C_OUTPUT_EXTENSION}
       DESTINATION ${mi_install_dir}
       RENAME ${mi_basename}${CMAKE_C_OUTPUT_EXTENSION} )
-  endif(MI_SKIP_INSTALL)
-endif(MI_BUILD_STATIC)
+  endif()
+endif()
 
 # -----------------------------------------------------------------------------
 # API surface testing
